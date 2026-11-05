@@ -14,8 +14,8 @@ const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], v
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
-let invF = { q: "", area: "All", low: false };
-let invTab = "items", countArea = "All", countDraft = {};
+let invF = { q: "", area: "All", low: false, vendor: "All" };
+let invTab = "items", countArea = "All", countVendor = "All", countDraft = {};
 let booted = false, channel = null, starting = false;
 
 /* ---------------- helpers ---------------- */
@@ -189,7 +189,7 @@ function vToday() {
   const week = []; for (let i = 1; i <= 7; i++) { const ds = ymd(addDays(new Date(), i)); remsOn(ds).filter(r => r.priority === "critical").forEach(r => week.push([r, ds])); }
   const shifts = S.shifts.filter(s => s.date === t).sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
   const myNext = S.shifts.filter(s => s.staff_id === me.id && s.date >= t).sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time)).slice(0, 4);
-  const low = S.inventory.filter(i => num(i.par) > 0 && num(i.on_hand) <= num(i.par)).sort(byName);
+  const low = S.inventory.filter(i => isLow(i)).sort(byName);
   const pins = S.messages.filter(m => m.pinned && (m.channel === "team" || MGR));
   const unread = S.dms.filter(d => d.recipient === me.id && !d.read_at).length;
   const sd = MGR ? S.sales.find(s => s.business_date === t) : null;
@@ -344,10 +344,14 @@ async function markRead() {
 
 /* ----- inventory (supplies) ----- */
 const AREAS = ["Dry storage", "Walk-in cooler", "Freezer", "Packaging", "Front counter", "Cleaning", "Other"];
-function isLow(i) { return num(i.par) > 0 && num(i.on_hand) <= num(i.par); }
+function isLow(i) { return (num(i.par) > 0 || num(i.order_up_to) > 0) && num(i.on_hand) <= num(i.par); }
 function suggestQty(i) { const target = num(i.order_up_to) > 0 ? num(i.order_up_to) : num(i.par) * 2; return Math.max(1, Math.ceil(target - num(i.on_hand))); }
 function supplies() { return S.inventory.filter(i => (i.item_type || "supply") === "supply"); }
 function bySheet(a, b) { return (a.area || "~").localeCompare(b.area || "~") || (num(a.sheet_order) - num(b.sheet_order)) || byName(a, b); }
+function vendorOptions() { const vs = [...new Set(supplies().map(i => i.vendor || ""))].sort((a, b) => (a || "~").localeCompare(b || "~")); return ["All", ...vs]; }
+function vendorLabel(v) { return v === "All" ? "All vendors" : v === "" ? "No vendor" : v; }
+function vendorSelect(id, cur) { return `<select id="${id}" style="width:auto" aria-label="Vendor">${vendorOptions().map(v => `<option value="${esc(v)}" ${v === cur ? "selected" : ""}>${esc(vendorLabel(v))}</option>`).join("")}</select>`; }
+function byVendor(list, v) { return v === "All" ? list : list.filter(i => (i.vendor || "") === v); }
 function areasInUse() { return [...new Set([...AREAS, ...supplies().map(i => i.area).filter(Boolean)])]; }
 function invStatus(i) { const o = num(i.on_hand), p = num(i.par); if (o <= 0) return '<span class="chip crit">Out</span>'; if (p > 0 && o <= p) return '<span class="chip warn">Low</span>'; return '<span class="chip ok">OK</span>'; }
 function vInventory() {
@@ -359,13 +363,14 @@ function vInventory() {
   ${invTab === "count" ? vCount() : invTab === "vendors" ? vVendors() : vItems()}`;
 }
 function vItems() {
-  let items = supplies().sort(bySheet);
+  let items = byVendor(supplies(), invF.vendor).sort(bySheet);
   if (invF.area !== "All") items = items.filter(i => (i.area || "") === invF.area);
   if (invF.low) items = items.filter(isLow);
   if (invF.q) items = items.filter(i => (i.name + " " + (i.vendor || "") + " " + (i.vendor_sku || "")).toLowerCase().includes(invF.q.toLowerCase()));
   return `<div class="row" style="margin-bottom:12px">
     <input id="invQ" type="search" placeholder="Search items, vendors or item #" value="${esc(invF.q)}" style="max-width:280px" aria-label="Search supplies">
-    <select id="invArea" style="width:auto" aria-label="Storage area">${["All", ...areasInUse()].map(c => `<option ${c === invF.area ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+    ${vendorSelect("invVendor", invF.vendor)}
+    <select id="invArea" style="width:auto" aria-label="Storage area">${["All", ...areasInUse().filter(a => byVendor(supplies(), invF.vendor).some(i => i.area === a))].map(c => `<option ${c === invF.area ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
     <label class="row small" style="gap:6px;font-weight:600"><input type="checkbox" id="invLow" class="check" ${invF.low ? "checked" : ""}> Low or out only</label>
   </div>
   <div class="card" style="padding:0">${supplies().length ? (items.length ? `<div class="scroll"><table><thead><tr><th>Item</th><th>Area</th><th>On hand</th><th>Reorder at</th><th>Order up to</th><th>Vendor</th><th>Status</th><th>Counted</th></tr></thead><tbody>
@@ -381,13 +386,14 @@ function vItems() {
 /* count screen: replaces the paper count sheets */
 function vCount() {
   if (!MGR) return `<div class="empty">Only managers can enter counts.</div>`;
-  let items = supplies().sort(bySheet);
-  if (!items.length) return `<div class="empty">Add your supplies on the Items tab first. Then counts happen here.</div>`;
+  let items = byVendor(supplies(), countVendor).sort(bySheet);
+  if (!supplies().length) return `<div class="empty">Add your supplies on the Items tab first. Then counts happen here.</div>`;
   if (countArea !== "All") items = items.filter(i => (i.area || "") === countArea);
   const groups = []; items.forEach(i => { const a = i.area || "Other"; let g = groups.find(x => x.a === a); if (!g) groups.push(g = { a, items: [] }); g.items.push(i); });
   const entered = Object.values(countDraft).filter(v => String(v).trim() !== "").length;
   return `<div class="row" style="margin-bottom:12px;justify-content:space-between">
-    <label class="f" for="countArea" style="flex-direction:row;align-items:center;gap:8px">Count area <select id="countArea" style="width:auto">${["All", ...areasInUse().filter(a => supplies().some(i => i.area === a))].map(a => `<option ${a === countArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label>
+    <div class="row"><label class="f" for="countVendor" style="flex-direction:row;align-items:center;gap:8px">Vendor ${vendorSelect("countVendor", countVendor)}</label>
+    <label class="f" for="countArea" style="flex-direction:row;align-items:center;gap:8px">Area <select id="countArea" style="width:auto">${["All", ...areasInUse().filter(a => byVendor(supplies(), countVendor).some(i => i.area === a))].map(a => `<option ${a === countArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label></div>
     <span class="small muted">Type what's on the shelf. Leave a box blank to keep the current number.</span></div>
   ${groups.map(g => `<section class="card" style="margin-bottom:12px"><h3>${esc(g.a)}</h3><div class="list">${g.items.map(i => `<div class="item" style="align-items:center">
       <div class="grow"><div class="t">${esc(i.name)}</div><div class="small muted">${esc(i.unit || "")}${i.unit ? " · " : ""}last count ${fmtNum(i.on_hand)}${i.last_counted_at ? " (" + esc(ago(i.last_counted_at)) + ")" : ""}</div></div>
@@ -705,7 +711,7 @@ function views() {
 function renderTabs() {
   const t = today();
   const crit = overdue().length + remsOn(t).filter(r => r.priority === "critical" && !isDone(r, t)).length;
-  const low = S.inventory.filter(i => num(i.par) > 0 && num(i.on_hand) <= num(i.par)).length;
+  const low = S.inventory.filter(i => isLow(i)).length;
   const unread = S.dms.filter(d => d.recipient === me.id && !d.read_at).length;
   const badge = { today: crit, inventory: MGR ? low : 0, messages: unread };
   $("tabs").innerHTML = views().map(([k, l]) => `<a href="#${k}" ${k === view ? 'aria-current="page"' : ""}>${l}${badge[k] ? `<span class="badge">${badge[k]}</span>` : ""}</a>`).join("");
@@ -795,6 +801,8 @@ document.addEventListener("change", async e => {
   }
   if (t.id === "invArea") { invF.area = t.value; render(); }
   if (t.id === "countArea") { countArea = t.value; render(); }
+  if (t.id === "countVendor") { countVendor = t.value; countArea = "All"; render(); }
+  if (t.id === "invVendor") { invF.vendor = t.value; invF.area = "All"; render(); }
   if (t.id === "invLow") { invF.low = t.checked; render(); }
   if (t.id === "salesDate" && t.value) { salesDate = t.value; await loadSalesDetail(); render(); }
 });
