@@ -10,11 +10,12 @@ const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
 const POSITIONS = ["Manager", "Baker", "Decorator", "Front of house", "Other"];
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
-const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], orders: [], shifts: [], sales: [], hourly: [], items: [], synclog: [] };
+const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], sales: [], hourly: [], items: [], synclog: [] };
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
-let invF = { q: "", cat: "All", low: false };
+let invF = { q: "", area: "All", low: false };
+let invTab = "items", countArea = "All", countDraft = {};
 let booted = false, channel = null, starting = false;
 
 /* ---------------- helpers ---------------- */
@@ -55,11 +56,12 @@ const LOADERS = {
   dms: () => sb.from("direct_messages").select("*").order("created_at", { ascending: false }).limit(1000),
   inventory: () => sb.from("inventory_items").select("*"),
   orders: () => sb.from("vendor_orders").select("*").order("updated_at", { ascending: false }).limit(200),
+  vendors: () => sb.from("vendors").select("*").order("name"),
   shifts: () => sb.from("shifts").select("*").gte("date", ymd(addDays(new Date(), -120))).lte("date", ymd(addDays(new Date(), 180))),
   sales: () => sb.from("sales_daily").select("*").order("business_date", { ascending: false }).limit(400),
   synclog: () => sb.from("sync_log").select("*").order("ran_at", { ascending: false }).limit(5),
 };
-const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendor_orders: "orders", shifts: "shifts", sales_daily: "sales" };
+const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", sales_daily: "sales" };
 async function load(key) {
   if ((key === "sales" || key === "synclog") && !MGR) return;
   const data = await q(LOADERS[key](), "load " + key);
@@ -340,68 +342,216 @@ async function markRead() {
   if (!error) scheduleReload("dms");
 }
 
-/* ----- inventory ----- */
+/* ----- inventory (supplies) ----- */
+const AREAS = ["Dry storage", "Walk-in cooler", "Freezer", "Packaging", "Front counter", "Cleaning", "Other"];
+function isLow(i) { return num(i.par) > 0 && num(i.on_hand) <= num(i.par); }
+function suggestQty(i) { const target = num(i.order_up_to) > 0 ? num(i.order_up_to) : num(i.par) * 2; return Math.max(1, Math.ceil(target - num(i.on_hand))); }
+function supplies() { return S.inventory.filter(i => (i.item_type || "supply") === "supply"); }
+function bySheet(a, b) { return (a.area || "~").localeCompare(b.area || "~") || (num(a.sheet_order) - num(b.sheet_order)) || byName(a, b); }
+function areasInUse() { return [...new Set([...AREAS, ...supplies().map(i => i.area).filter(Boolean)])]; }
 function invStatus(i) { const o = num(i.on_hand), p = num(i.par); if (o <= 0) return '<span class="chip crit">Out</span>'; if (p > 0 && o <= p) return '<span class="chip warn">Low</span>'; return '<span class="chip ok">OK</span>'; }
 function vInventory() {
-  let items = S.inventory.slice().sort((a, b) => (a.category || "").localeCompare(b.category || "") || byName(a, b));
-  if (invF.cat !== "All") items = items.filter(i => i.category === invF.cat);
-  if (invF.low) items = items.filter(i => num(i.on_hand) <= num(i.par));
-  if (invF.q) items = items.filter(i => (i.name + " " + (i.vendor || "")).toLowerCase().includes(invF.q.toLowerCase()));
-  return `<div class="head"><h2>Inventory</h2>${MGR ? `<button class="primary" data-act="invNew">Add item</button>` : ""}</div>
-  <div class="row" style="margin-bottom:12px">
-    <input id="invQ" type="search" placeholder="Search items or vendors" value="${esc(invF.q)}" style="max-width:260px" aria-label="Search inventory">
-    <select id="invCat" style="width:auto" aria-label="Category">${["All", ...INV_CATS].map(c => `<option ${c === invF.cat ? "selected" : ""}>${c}</option>`).join("")}</select>
+  const tabs = [["items", "Items"], ["count", "Count"], ["vendors", "Vendors"]];
+  return `<div class="head"><h2>Supplies</h2>
+    ${MGR && invTab === "items" ? `<button class="primary" data-act="invNew">Add item</button>` : ""}
+    ${MGR && invTab === "vendors" ? `<button class="primary" data-act="vendNew">Add vendor</button>` : ""}</div>
+  <div class="sub" role="group" aria-label="Supplies views">${tabs.map(([k, l]) => `<button data-act="invTab" data-tab="${k}" aria-pressed="${invTab === k}">${l}</button>`).join("")}</div>
+  ${invTab === "count" ? vCount() : invTab === "vendors" ? vVendors() : vItems()}`;
+}
+function vItems() {
+  let items = supplies().sort(bySheet);
+  if (invF.area !== "All") items = items.filter(i => (i.area || "") === invF.area);
+  if (invF.low) items = items.filter(isLow);
+  if (invF.q) items = items.filter(i => (i.name + " " + (i.vendor || "") + " " + (i.vendor_sku || "")).toLowerCase().includes(invF.q.toLowerCase()));
+  return `<div class="row" style="margin-bottom:12px">
+    <input id="invQ" type="search" placeholder="Search items, vendors or item #" value="${esc(invF.q)}" style="max-width:280px" aria-label="Search supplies">
+    <select id="invArea" style="width:auto" aria-label="Storage area">${["All", ...areasInUse()].map(c => `<option ${c === invF.area ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
     <label class="row small" style="gap:6px;font-weight:600"><input type="checkbox" id="invLow" class="check" ${invF.low ? "checked" : ""}> Low or out only</label>
   </div>
-  <div class="card" style="padding:0">${S.inventory.length ? (items.length ? `<div class="scroll"><table><thead><tr><th>Item</th><th>Category</th><th>On hand</th><th>Par</th><th>Vendor</th><th>Status</th></tr></thead><tbody>
-    ${items.map(i => `<tr><td>${MGR ? `<button class="link" data-act="invEdit" data-id="${i.id}">${esc(i.name)}</button>` : esc(i.name)}</td><td class="muted">${esc(i.category || "")}</td>
+  <div class="card" style="padding:0">${supplies().length ? (items.length ? `<div class="scroll"><table><thead><tr><th>Item</th><th>Area</th><th>On hand</th><th>Reorder at</th><th>Order up to</th><th>Vendor</th><th>Status</th><th>Counted</th></tr></thead><tbody>
+    ${items.map(i => `<tr><td>${MGR ? `<button class="link" data-act="invEdit" data-id="${i.id}">${esc(i.name)}</button>` : esc(i.name)}${i.vendor_sku ? `<div class="small muted">#${esc(i.vendor_sku)}</div>` : ""}</td>
+    <td class="muted">${esc(i.area || "")}</td>
     <td><span class="qty">${MGR ? `<button class="sm" data-act="invAdj" data-id="${i.id}" data-d="-1" aria-label="One less ${esc(i.name)}">−</button>` : ""}<b>${fmtNum(i.on_hand)}</b>${MGR ? `<button class="sm" data-act="invAdj" data-id="${i.id}" data-d="1" aria-label="One more ${esc(i.name)}">+</button>` : ""}<span class="small muted">${esc(i.unit || "")}</span></span></td>
-    <td>${fmtNum(i.par)}</td><td class="muted">${esc(i.vendor || "")}</td><td>${invStatus(i)}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty" style="margin:16px">No items match these filters.</div>`)
-    : `<div class="empty" style="margin:16px">No items yet.${MGR ? " Add the supplies and retail products you track, with a par level so low stock gets flagged." : ""}</div>`}</div>`;
+    <td>${fmtNum(i.par)}</td><td>${num(i.order_up_to) ? fmtNum(i.order_up_to) : `<span class="muted">–</span>`}</td>
+    <td class="muted">${esc(i.vendor || "")}</td><td>${invStatus(i)}</td>
+    <td class="small muted">${i.last_counted_at ? esc(ago(i.last_counted_at)) : "Never"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty" style="margin:16px">No items match these filters.</div>`)
+    : `<div class="empty" style="margin:16px">No supplies yet.${MGR ? " Add the items from your count sheets, with where they're stored, the vendor and its item number, and a reorder level." : ""}</div>`}</div>`;
 }
-function invForm(i) {
-  i = i || {};
-  const vendors = [...new Set(S.inventory.map(x => x.vendor).filter(Boolean))];
+
+/* count screen: replaces the paper count sheets */
+function vCount() {
+  if (!MGR) return `<div class="empty">Only managers can enter counts.</div>`;
+  let items = supplies().sort(bySheet);
+  if (!items.length) return `<div class="empty">Add your supplies on the Items tab first. Then counts happen here.</div>`;
+  if (countArea !== "All") items = items.filter(i => (i.area || "") === countArea);
+  const groups = []; items.forEach(i => { const a = i.area || "Other"; let g = groups.find(x => x.a === a); if (!g) groups.push(g = { a, items: [] }); g.items.push(i); });
+  const entered = Object.values(countDraft).filter(v => String(v).trim() !== "").length;
+  return `<div class="row" style="margin-bottom:12px;justify-content:space-between">
+    <label class="f" for="countArea" style="flex-direction:row;align-items:center;gap:8px">Count area <select id="countArea" style="width:auto">${["All", ...areasInUse().filter(a => supplies().some(i => i.area === a))].map(a => `<option ${a === countArea ? "selected" : ""}>${esc(a)}</option>`).join("")}</select></label>
+    <span class="small muted">Type what's on the shelf. Leave a box blank to keep the current number.</span></div>
+  ${groups.map(g => `<section class="card" style="margin-bottom:12px"><h3>${esc(g.a)}</h3><div class="list">${g.items.map(i => `<div class="item" style="align-items:center">
+      <div class="grow"><div class="t">${esc(i.name)}</div><div class="small muted">${esc(i.unit || "")}${i.unit ? " · " : ""}last count ${fmtNum(i.on_hand)}${i.last_counted_at ? " (" + esc(ago(i.last_counted_at)) + ")" : ""}</div></div>
+      <input class="cnt" id="cnt_${i.id}" data-id="${i.id}" type="number" min="0" step="any" inputmode="decimal" style="width:96px" aria-label="Count for ${esc(i.name)}" placeholder="${fmtNum(i.on_hand)}" value="${esc(countDraft[i.id] ?? "")}">
+    </div>`).join("")}</div></section>`).join("")}
+  <div class="card row" style="position:sticky;bottom:calc(12px + env(safe-area-inset-bottom,0px));justify-content:space-between;z-index:3">
+    <span class="small"><b id="countN">${entered}</b> item${entered === 1 ? "" : "s"} counted</span>
+    <div class="row"><button data-act="countClear">Clear</button><button class="primary" data-act="countSave">Save count</button></div></div>`;
+}
+async function saveCount(btn) {
+  const entries = Object.entries(countDraft).filter(([, v]) => String(v).trim() !== "");
+  if (!entries.length) { toast("Enter at least one count first"); return; }
+  btn.disabled = true; btn.textContent = "Saving…";
+  const now = new Date().toISOString(), lines = []; let failed = 0;
+  for (const [id, v] of entries) {
+    const it = S.inventory.find(i => i.id === id); if (!it) continue;
+    const qty = Math.max(0, num(v));
+    const { error } = await sb.from("inventory_items").update({ on_hand: qty, last_counted_at: now, last_counted_by: me.id, updated_at: now }).eq("id", id);
+    if (error) failed++; else lines.push({ item_id: id, name: it.name, qty });
+  }
+  if (lines.length) await sb.from("inventory_counts").insert({ area: countArea === "All" ? "" : countArea, lines });
+  countDraft = {};
+  await load("inventory");
+  const n = suggestionsByVendor().reduce((a, g) => a + g.items.length, 0);
+  toast(failed ? `Saved ${lines.length}; ${failed} didn't save. Try those again.` : `Count saved for ${lines.length} item${lines.length === 1 ? "" : "s"}.${n ? ` ${n} need ordering.` : ""}`);
+  if (n && !failed) location.hash = "#orders"; else render();
+}
+
+/* vendors */
+const METHOD_LABEL = { portal: "Website", email: "Email", phone: "Phone" };
+function vVendors() {
+  const vs = S.vendors.slice().sort(byName);
+  return vs.length ? `<div class="grid">${vs.map(v => {
+    const n = supplies().filter(i => i.vendor === v.name).length;
+    return `<section class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${MGR ? `<button class="link" data-act="vendEdit" data-id="${v.id}">${esc(v.name)}</button>` : esc(v.name)}</h3><span class="chip acc">${METHOD_LABEL[v.method] || ""}</span></div>
+      <div class="small muted" style="margin-top:6px;display:flex;flex-direction:column;gap:3px">
+        <span>${n} item${n === 1 ? "" : "s"}</span>
+        ${v.order_days ? `<span>${esc(v.order_days)}</span>` : ""}
+        ${v.account_no ? `<span>Account ${esc(v.account_no)}</span>` : ""}
+        ${v.rep_name || v.phone ? `<span>${esc(v.rep_name || "")}${v.rep_name && v.phone ? " · " : ""}${esc(v.phone || "")}</span>` : ""}
+        ${v.email ? `<span>${esc(v.email)}</span>` : ""}
+        ${v.notes ? `<span>${esc(v.notes)}</span>` : ""}
+      </div>
+      ${v.portal_url ? `<a class="btn" href="${esc(v.portal_url)}" target="_blank" rel="noopener" style="display:inline-block;margin-top:10px;text-decoration:none">Open ${esc(v.name)} site</a>` : ""}</section>`;
+  }).join("")}</div>` : `<div class="empty">No vendors yet.${MGR ? " Add Sysco, SHIPP and anyone else you order from." : ""}</div>`;
+}
+function vendForm(v) {
+  v = v || { method: "portal" };
   openForm({
-    title: i.id ? "Edit item" : "New inventory item", submit: i.id ? "Save" : "Add item",
-    extra: `<datalist id="vendList">${vendors.map(v => `<option value="${esc(v)}">`).join("")}</datalist>`,
+    title: v.id ? "Edit " + v.name : "New vendor", submit: v.id ? "Save" : "Add vendor", fields: [
+      { id: "name", label: "Vendor name", value: v.name, required: true },
+      { id: "method", label: "How you place orders", type: "select", value: v.method, options: [["portal", "On their website"], ["email", "Email to a rep"], ["phone", "Phone call"]] },
+      { id: "portal_url", label: "Ordering website", type: "url", value: v.portal_url, ph: "https://" },
+      [{ id: "rep_name", label: "Rep name", value: v.rep_name }, { id: "phone", label: "Phone", type: "tel", value: v.phone }],
+      [{ id: "email", label: "Order email", type: "email", value: v.email }, { id: "account_no", label: "Your account #", value: v.account_no }],
+      { id: "order_days", label: "Order cutoff and delivery days", value: v.order_days, ph: "e.g. Order Mon by 2pm, delivers Wed" },
+      { id: "notes", label: "Notes", type: "textarea", value: v.notes }],
+    onSubmit: d => v.id ? write("vendors", "update", d, v.id) : write("vendors", "insert", d),
+    onDelete: v.id ? () => write("vendors", "delete", null, v.id) : null
+  });
+}
+
+function invForm(i) {
+  i = i || { area: invF.area !== "All" ? invF.area : "Dry storage" };
+  const vendorOpts = [["", "No vendor"], ...S.vendors.slice().sort(byName).map(v => [v.name, v.name])];
+  if (i.vendor && !vendorOpts.some(o => o[0] === i.vendor)) vendorOpts.push([i.vendor, i.vendor]);
+  const areaOpts = areasInUse(); if (i.area && !areaOpts.includes(i.area)) areaOpts.push(i.area);
+  openForm({
+    title: i.id ? "Edit item" : "New supply item", submit: i.id ? "Save" : "Add item",
     fields: [{ id: "name", label: "Item name", value: i.name, required: true, ph: "e.g. 8-inch cake boards" },
-      [{ id: "category", label: "Category", type: "select", value: i.category || "Supplies", options: INV_CATS }, { id: "unit", label: "Counted in", value: i.unit, ph: "cases, bags, each" }],
-      [{ id: "on_hand", label: "On hand", type: "number", value: i.on_hand ?? 0 }, { id: "par", label: "Par (reorder at)", type: "number", value: i.par ?? 0 }],
-      { id: "vendor", label: "Vendor", value: i.vendor, list: "vendList", ph: "Who you order it from" },
+      [{ id: "area", label: "Stored in (count section)", type: "select", value: i.area || "Other", options: areaOpts }, { id: "sheet_order", label: "Order on count sheet", type: "number", value: i.sheet_order ?? 0 }],
+      [{ id: "unit", label: "Counted in", value: i.unit, ph: "cases, sleeves, each" }, { id: "on_hand", label: "On hand", type: "number", value: i.on_hand ?? 0 }],
+      [{ id: "par", label: "Reorder when at or below", type: "number", value: i.par ?? 0 }, { id: "order_up_to", label: "Order back up to", type: "number", value: i.order_up_to ?? 0 }],
+      [{ id: "vendor", label: "Vendor", type: "select", value: i.vendor || "", options: vendorOpts }, { id: "vendor_sku", label: "Vendor item #", value: i.vendor_sku }],
+      { id: "order_unit", label: "How the vendor sells it (optional)", value: i.order_unit, ph: "e.g. case of 500" },
       { id: "notes", label: "Notes", type: "textarea", value: i.notes }],
-    onSubmit: v => { v.updated_at = new Date().toISOString(); return i.id ? write("inventory_items", "update", v, i.id) : write("inventory_items", "insert", v); },
+    onSubmit: v => { v.updated_at = new Date().toISOString(); v.item_type = "supply"; return i.id ? write("inventory_items", "update", v, i.id) : write("inventory_items", "insert", v); },
     onDelete: i.id ? () => write("inventory_items", "delete", null, i.id) : null
   });
 }
 
 /* ----- vendor orders ----- */
 const ST_LABEL = { draft: "Draft", placed: "Ordered", received: "Received" };
+function onOrderIds() { return new Set(S.orders.filter(o => o.status !== "received").flatMap(o => (o.lines || []).map(l => l.item_id)).filter(Boolean)); }
+function suggestionsByVendor() {
+  const on = onOrderIds(), groups = [];
+  supplies().filter(i => isLow(i) && !on.has(i.id)).sort(bySheet).forEach(i => {
+    const v = i.vendor || "No vendor"; let g = groups.find(x => x.v === v); if (!g) groups.push(g = { v, items: [] }); g.items.push(i);
+  });
+  return groups.sort((a, b) => a.v.localeCompare(b.v));
+}
 function vOrders() {
+  const sugg = MGR ? suggestionsByVendor() : [];
   const card = o => {
     const lines = o.lines || []; return `<div class="item"><div class="grow">
-    <div class="row" style="gap:8px">${MGR ? `<button class="link t" data-act="ordEdit" data-id="${o.id}">${esc(o.vendor)}</button>` : `<span class="t">${esc(o.vendor)}</span>`}
+    <div class="row" style="gap:8px">${MGR && o.status !== "received" ? `<button class="link t" data-act="ordEdit" data-id="${o.id}">${esc(o.vendor)}</button>` : `<span class="t">${esc(o.vendor)}</span>`}
     <span class="chip ${o.status === "placed" ? "warn" : o.status === "received" ? "ok" : "acc"}">${ST_LABEL[o.status]}</span></div>
     <div class="small muted">${lines.length} item${lines.length === 1 ? "" : "s"}${o.placed_date ? " · ordered " + esc(fmtDate(o.placed_date)) : ""}${o.expected ? " · expected " + esc(fmtDate(o.expected)) : ""}${o.received_date ? " · received " + esc(fmtDate(o.received_date)) : ""}</div>
-    <div class="small" style="margin-top:4px">${lines.slice(0, 4).map(l => `${esc(l.name)} × ${fmtNum(l.qty)}`).join(", ")}${lines.length > 4 ? ", …" : ""}</div></div>
-    ${MGR ? `<div class="row" style="gap:6px;justify-content:flex-end">${o.status === "draft" ? `<button class="sm" data-act="ordPlace" data-id="${o.id}">Mark ordered</button>` : ""}${o.status === "placed" ? `<button class="sm primary" data-act="ordRecv" data-id="${o.id}">Mark received</button>` : ""}</div>` : ""}</div>`;
+    <div class="small" style="margin-top:4px">${lines.slice(0, 4).map(l => `${esc(l.name)} × ${fmtNum(l.qty)}${l.received != null && num(l.received) !== num(l.qty) ? ` <span style="color:var(--crit)">(got ${fmtNum(l.received)})</span>` : ""}`).join(", ")}${lines.length > 4 ? ", …" : ""}</div></div>
+    ${MGR ? `<div class="row" style="gap:6px;justify-content:flex-end">
+      ${o.status !== "received" ? `<button class="sm" data-act="ordSend" data-id="${o.id}">${o.status === "draft" ? "Send order" : "View list"}</button>` : ""}
+      ${o.status === "draft" ? `<button class="sm" data-act="ordPlace" data-id="${o.id}">Mark ordered</button>` : ""}
+      ${o.status === "placed" ? `<button class="sm primary" data-act="ordRecv" data-id="${o.id}">Receive</button>` : ""}</div>` : ""}</div>`;
   };
   const list = st => { let os = S.orders.filter(o => o.status === st); if (st === "received") os = os.slice(0, 15); return os; };
   return `<div class="head"><h2>Vendor orders</h2>${MGR ? `<button class="primary" data-act="ordNew">New order</button>` : ""}</div>
-  <p class="muted small" style="margin:-8px 0 14px">Marking an order received adds its quantities to inventory.</p>
+  ${MGR ? `<section class="card" style="margin-bottom:16px"><h3>Suggested orders</h3>
+    ${sugg.length ? `<p class="small muted" style="margin:-4px 0 8px">Based on your latest counts: items at or below their reorder level that aren't already on an order.</p>
+      <div class="grid">${sugg.map(g => `<div style="min-width:0"><div class="row" style="justify-content:space-between;margin-bottom:4px"><b>${esc(g.v)}</b><button class="sm primary" data-act="suggCreate" data-vendor="${esc(g.v)}">${S.orders.some(o => o.status === "draft" && o.vendor === g.v) ? "Add to draft" : "Create order"}</button></div>
+        <div class="list">${g.items.map(i => `<div class="item"><div class="grow"><div class="t">${esc(i.name)}</div><div class="small muted">${i.vendor_sku ? "#" + esc(i.vendor_sku) + " · " : ""}have ${fmtNum(i.on_hand)}, reorder at ${fmtNum(i.par)}</div></div><span class="chip warn">Order ${fmtNum(suggestQty(i))}${i.order_unit ? " " + esc(i.order_unit) : ""}</span></div>`).join("")}</div></div>`).join("")}</div>`
+      : `<div class="empty">Nothing needs ordering right now. Do a count on the Supplies tab to refresh this.</div>`}</section>` : ""}
   <div class="grid">${["draft", "placed", "received"].map(g => { const os = list(g); return `<section class="card"><h3>${g === "draft" ? "Drafts" : g === "placed" ? "Ordered, waiting on delivery" : "Recently received"}</h3>${os.length ? `<div class="list">${os.map(card).join("")}</div>` : `<div class="empty">None right now.</div>`}</section>`; }).join("")}</div>`;
+}
+async function createFromSuggestion(vendor) {
+  const g = suggestionsByVendor().find(x => x.v === vendor); if (!g) return;
+  const lines = g.items.map(i => ({ item_id: i.id, name: i.name, qty: suggestQty(i) }));
+  const draft = S.orders.find(o => o.status === "draft" && o.vendor === vendor);
+  const now = new Date().toISOString();
+  const ok = draft
+    ? await write("vendor_orders", "update", { lines: [...(draft.lines || []), ...lines.filter(l => !(draft.lines || []).some(d => d.item_id === l.item_id))], updated_at: now }, draft.id)
+    : await write("vendor_orders", "insert", { vendor, status: "draft", lines, updated_at: now });
+  if (ok) toast(draft ? `Added ${lines.length} item${lines.length > 1 ? "s" : ""} to the ${vendor} draft` : `Draft order for ${vendor} created. Review it, then Send order.`);
+}
+function orderRows(o) {
+  return (o.lines || []).map(l => { const it = S.inventory.find(i => i.id === l.item_id) || {}; return { sku: it.vendor_sku || "", name: l.name, qty: num(l.qty), unit: it.order_unit || it.unit || "" }; });
+}
+function csvCell(v) { const s = String(v ?? ""); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function sendOrder(o) {
+  const v = S.vendors.find(x => x.name === o.vendor) || {};
+  const rows = orderRows(o);
+  const text = `Order from ${CFG.STORE_NAME || "our bakery"}${v.account_no ? ` (account ${v.account_no})` : ""}\n\n` + rows.map(r => `${r.sku ? "#" + r.sku + "  " : ""}${r.name}  x ${fmtNum(r.qty)}${r.unit ? " " + r.unit : ""}`).join("\n") + (o.notes ? `\n\nNotes: ${o.notes}` : "");
+  const csv = "Item Number,Description,Quantity,Unit\n" + rows.map(r => [r.sku, r.name, r.qty, r.unit].map(csvCell).join(",")).join("\n");
+  const mail = v.email ? `mailto:${encodeURIComponent(v.email)}?subject=${encodeURIComponent("Order from " + (CFG.STORE_NAME || "our bakery"))}&body=${encodeURIComponent(text)}` : "";
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><div class="dialog" role="dialog" aria-label="Send order">
+    <h3>Send order to ${esc(o.vendor)}</h3>
+    ${v.order_days ? `<p class="small muted" style="margin:0">${esc(v.order_days)}</p>` : ""}
+    <div class="scroll"><table><thead><tr><th>Item #</th><th>Item</th><th>Qty</th><th>Unit</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.sku) || `<span class="muted">–</span>`}</td><td>${esc(r.name)}</td><td>${fmtNum(r.qty)}</td><td class="muted">${esc(r.unit)}</td></tr>`).join("") || `<tr><td colspan="4" class="muted">This order has no items.</td></tr>`}</tbody></table></div>
+    ${rows.some(r => !r.sku) ? `<p class="small muted" style="margin:0">Add vendor item numbers on the Supplies tab to make entering this faster.</p>` : ""}
+    <div class="row">
+      ${v.portal_url ? `<a class="btn primary" href="${esc(v.portal_url)}" target="_blank" rel="noopener" style="text-decoration:none">Open ${esc(o.vendor)} site</a>` : ""}
+      <button type="button" id="sendCopy">Copy list</button>
+      <button type="button" id="sendCsv">Download file</button>
+      ${mail ? `<a class="btn" href="${mail}" style="text-decoration:none">Email ${esc(v.rep_name || "rep")}</a>` : ""}
+    </div>
+    <div class="row" style="justify-content:flex-end;border-top:1px solid var(--line);padding-top:12px">
+      <button type="button" data-act="close">Close</button>
+      ${o.status === "draft" ? `<button type="button" class="primary" id="sendPlaced">I placed this order</button>` : ""}
+    </div></div></div>`;
+  $("sendCopy").onclick = async () => { try { await navigator.clipboard.writeText(text); toast("Order list copied"); } catch (e) { toast("Couldn't copy. Select the list and copy it by hand."); } };
+  $("sendCsv").onclick = () => { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); a.download = `${o.vendor.replace(/\W+/g, "-")}-order-${today()}.csv`; document.body.appendChild(a); a.click(); a.remove(); };
+  const placed = $("sendPlaced");
+  if (placed) placed.onclick = async () => { if (await write("vendor_orders", "update", { status: "placed", placed_date: today(), updated_at: new Date().toISOString() }, o.id)) { closeModal(); toast("Marked as ordered"); } };
 }
 function ordForm(o) {
   o = o ? JSON.parse(JSON.stringify(o)) : { status: "draft", lines: [] };
   let lines = o.lines || [];
-  const vendors = [...new Set([...S.inventory.map(x => x.vendor), ...S.orders.map(x => x.vendor)].filter(Boolean))];
+  const vendors = [...new Set([...S.vendors.map(v => v.name), ...supplies().map(x => x.vendor), ...S.orders.map(x => x.vendor)].filter(Boolean))];
   $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="ordDlg" novalidate>
     <h3>${o.id ? "Edit order" : "New vendor order"}</h3>
     <datalist id="ordVend">${vendors.map(v => `<option value="${esc(v)}">`).join("")}</datalist>
-    <datalist id="ordItems">${S.inventory.slice().sort(byName).map(i => `<option value="${esc(i.name)}">`).join("")}</datalist>
+    <datalist id="ordItems">${supplies().sort(byName).map(i => `<option value="${esc(i.name)}">`).join("")}</datalist>
     <div class="two"><label class="f" for="oVendor">Vendor<input id="oVendor" list="ordVend" value="${esc(o.vendor || "")}" placeholder="Vendor name" required></label>
     <label class="f" for="oExp">Expected delivery<input id="oExp" type="date" value="${esc(o.expected || "")}"></label></div>
-    <div class="row" style="justify-content:space-between"><b class="small">Items</b><button type="button" class="sm" id="oFill">Fill low-stock items from this vendor</button></div>
+    <div class="row" style="justify-content:space-between"><b class="small">Items</b><button type="button" class="sm" id="oFill">Add low items from this vendor</button></div>
     <div class="lines" id="oLines"></div>
     <button type="button" class="sm" id="oAdd" style="align-self:flex-start">+ Add line</button>
     <label class="f" for="oNotes">Notes<textarea id="oNotes" placeholder="PO number, rep, delivery notes">${esc(o.notes || "")}</textarea></label>
@@ -415,9 +565,9 @@ function ordForm(o) {
   $("oAdd").onclick = () => { sync(); lines.push({ name: "", qty: 1 }); draw(); box.querySelector(".line:last-child .ln").focus(); };
   $("oFill").onclick = () => {
     sync(); const v = $("oVendor").value.trim().toLowerCase();
-    const low = S.inventory.filter(i => num(i.par) > 0 && num(i.on_hand) <= num(i.par) && (!v || (i.vendor || "").toLowerCase() === v));
-    let added = 0; low.forEach(i => { if (!lines.some(l => l.item_id === i.id || l.name === i.name)) { lines.push({ name: i.name, item_id: i.id, qty: Math.max(1, Math.ceil(num(i.par) * 2 - num(i.on_hand))) }); added++; } });
-    draw(); toast(added ? `Added ${added} low-stock item${added > 1 ? "s" : ""}` : v ? "Nothing from this vendor is low" : "Nothing is low right now");
+    const low = supplies().filter(i => isLow(i) && (!v || (i.vendor || "").toLowerCase() === v));
+    let added = 0; low.forEach(i => { if (!lines.some(l => l.item_id === i.id || l.name === i.name)) { lines.push({ name: i.name, item_id: i.id, qty: suggestQty(i) }); added++; } });
+    draw(); toast(added ? `Added ${added} low item${added > 1 ? "s" : ""}` : v ? "Nothing from this vendor is low" : "Nothing is low right now");
   };
   $("ordDlg").addEventListener("submit", async e => {
     e.preventDefault(); sync();
@@ -429,13 +579,32 @@ function ordForm(o) {
   const del = $("oDel");
   if (del) del.onclick = async () => { if (del.dataset.armed) { await write("vendor_orders", "delete", null, o.id); closeModal(); toast("Deleted"); } else { del.dataset.armed = "1"; del.textContent = "Tap again to delete"; } };
 }
-async function receive(o) {
-  for (const l of o.lines || []) {
-    const inv = S.inventory.find(i => i.id === l.item_id) || S.inventory.find(i => i.name === l.name);
-    if (inv) await write("inventory_items", "update", { on_hand: num(inv.on_hand) + num(l.qty), updated_at: new Date().toISOString() }, inv.id);
-  }
-  await write("vendor_orders", "update", { status: "received", received_date: today(), updated_at: new Date().toISOString() }, o.id);
-  toast("Received. Inventory updated.");
+/* receiving: check off what arrived; received amounts go into inventory */
+function receiveForm(o) {
+  const lines = o.lines || [];
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="recvDlg" novalidate>
+    <h3>Receive ${esc(o.vendor)} delivery</h3>
+    <p class="small muted" style="margin:0">Change any amount that came in short or extra. Received amounts are added to inventory.</p>
+    <div class="list">${lines.map((l, i) => `<div class="item" style="align-items:center"><div class="grow"><div class="t">${esc(l.name)}</div><div class="small muted">ordered ${fmtNum(l.qty)}${l.item_id && S.inventory.some(x => x.id === l.item_id) ? "" : " · not linked to an inventory item"}</div></div>
+      <label class="small" for="rq${i}" style="display:flex;flex-direction:column;gap:2px;font-weight:600">Received<input id="rq${i}" class="rq" data-i="${i}" type="number" min="0" step="any" inputmode="decimal" value="${esc(l.qty)}" style="width:90px"></label></div>`).join("") || `<div class="empty">This order has no items.</div>`}</div>
+    <div class="row" style="justify-content:flex-end"><button type="button" data-act="close">Cancel</button><button class="primary" type="submit">Add to inventory</button></div>
+  </form></div>`;
+  $("recvDlg").addEventListener("submit", async e => {
+    e.preventDefault();
+    const got = [...document.querySelectorAll(".rq")].map(el => Math.max(0, num(el.value)));
+    const now = new Date().toISOString(); const short = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i], rec = got[i];
+      if (rec < num(l.qty)) short.push(`${l.name} (ordered ${fmtNum(l.qty)}, got ${fmtNum(rec)})`);
+      const inv = S.inventory.find(x => x.id === l.item_id) || S.inventory.find(x => x.name === l.name);
+      if (inv && rec > 0) await sb.from("inventory_items").update({ on_hand: num(inv.on_hand) + rec, updated_at: now }).eq("id", inv.id);
+    }
+    const newLines = lines.map((l, i) => ({ ...l, received: got[i] }));
+    const notes = short.length ? ((o.notes ? o.notes + "\n" : "") + "Short: " + short.join("; ")) : (o.notes || "");
+    if (await write("vendor_orders", "update", { status: "received", received_date: today(), lines: newLines, notes, updated_at: now }, o.id)) {
+      scheduleReload("inventory"); closeModal(); toast(short.length ? `Received. ${short.length} item${short.length > 1 ? "s" : ""} came in short.` : "Received. Inventory updated.");
+    }
+  });
 }
 
 /* ----- schedule ----- */
@@ -531,7 +700,7 @@ function inviteForm() {
 
 /* ---------------- render ---------------- */
 function views() {
-  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["messages", "Messages"], ["inventory", "Inventory"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
+  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
 }
 function renderTabs() {
   const t = today();
@@ -549,7 +718,9 @@ function render() {
   const main = $("main");
   const keep = ["msgText", "dmText", "invQ"].map(id => { const el = $(id); return el ? [id, el.value, el === document.activeElement, el.selectionStart] : null; }).filter(Boolean);
   const fn = { today: vToday, sales: vSales, calendar: vCalendar, messages: vMessages, inventory: vInventory, orders: vOrders, schedule: vSchedule, team: vTeam }[view] || vToday;
+  const ae = document.activeElement, cntFocus = ae && ae.id && ae.id.startsWith("cnt_") ? ae.id : null;
   main.innerHTML = fn();
+  if (cntFocus) { const el = $(cntFocus); if (el) el.focus(); }
   keep.forEach(([id, val, focused, pos]) => { const el = $(id); if (!el) return; el.value = val; if (focused) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) { } } });
   const th = $("thread"); if (th) th.scrollTop = th.scrollHeight;
   markRead();
@@ -586,7 +757,14 @@ document.addEventListener("click", async e => {
     case "ordNew": ordForm(); break;
     case "ordEdit": ordForm(S.orders.find(o => o.id === id)); break;
     case "ordPlace": write("vendor_orders", "update", { status: "placed", placed_date: today(), updated_at: new Date().toISOString() }, id); toast("Marked as ordered"); break;
-    case "ordRecv": { const o = S.orders.find(x => x.id === id); if (o) receive(o); break; }
+    case "ordRecv": { const o = S.orders.find(x => x.id === id); if (o) receiveForm(o); break; }
+    case "ordSend": { const o = S.orders.find(x => x.id === id); if (o) sendOrder(o); break; }
+    case "suggCreate": createFromSuggestion(b.dataset.vendor); break;
+    case "invTab": invTab = b.dataset.tab; render(); break;
+    case "countSave": saveCount(b); break;
+    case "countClear": countDraft = {}; render(); break;
+    case "vendNew": vendForm(); break;
+    case "vendEdit": vendForm(S.vendors.find(v => v.id === id)); break;
     case "shiftNew": shiftForm(null, b.dataset.staff, b.dataset.date); break;
     case "shiftEdit": shiftForm(S.shifts.find(s => s.id === id)); break;
     case "wkPrev": weekStart = addDays(weekStart, -7); render(); break;
@@ -615,11 +793,18 @@ document.addEventListener("change", async e => {
     if (dd.length > 400) dd = dd.slice(-400);
     write("reminders", "update", { done_dates: dd }, r.id); return;
   }
-  if (t.id === "invCat") { invF.cat = t.value; render(); }
+  if (t.id === "invArea") { invF.area = t.value; render(); }
+  if (t.id === "countArea") { countArea = t.value; render(); }
   if (t.id === "invLow") { invF.low = t.checked; render(); }
   if (t.id === "salesDate" && t.value) { salesDate = t.value; await loadSalesDetail(); render(); }
 });
-document.addEventListener("input", e => { if (e.target.id === "invQ") { invF.q = e.target.value; render(); } });
+document.addEventListener("input", e => {
+  if (e.target.id === "invQ") { invF.q = e.target.value; render(); }
+  if (e.target.classList && e.target.classList.contains("cnt")) {
+    countDraft[e.target.dataset.id] = e.target.value;
+    const n = $("countN"); if (n) n.textContent = Object.values(countDraft).filter(v => String(v).trim() !== "").length;
+  }
+});
 document.addEventListener("submit", async e => {
   if (e.target.id === "postForm") {
     e.preventDefault();
@@ -689,7 +874,7 @@ async function startAppInner() {
   if (!me.active) { await sb.auth.signOut(); showAuth("login", "Your account has been turned off. Talk to a manager."); return; }
   $("authView").hidden = true; $("appView").hidden = false;
   $("main").innerHTML = `<div class="empty">Loading…</div>`;
-  await Promise.all(["reminders", "messages", "dms", "inventory", "orders", "shifts", "sales", "synclog"].map(load));
+  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "sales", "synclog"].map(load));
   if (!booted) {
     booted = true;
     channel = sb.channel("hub");
