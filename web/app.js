@@ -7,7 +7,7 @@ const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY);
 
 const REM_CATS = ["Food safety", "Ordering", "Equipment", "Cleaning", "Payroll & admin", "Events", "Other"];
 const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
-const POSITIONS = ["Manager", "Baker", "Decorator", "Front of house", "Other"];
+const POSITIONS = ["Joy Creator", "Froster", "Baker", "Utility", "Shift Lead", "Key Holder", "Manager", "Owner"];
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
 const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], sales: [], hourly: [], items: [], synclog: [] };
@@ -674,7 +674,7 @@ function personForm(p) {
   openForm({
     title: "Edit " + (p.name || "team member"), fields: [
       { id: "name", label: "Name", value: p.name, required: true },
-      [{ id: "position", label: "Position", type: "select", value: p.position || "Front of house", options: POSITIONS }, { id: "phone", label: "Phone (optional)", type: "tel", value: p.phone }],
+      [{ id: "position", label: "Position", type: "select", value: p.position || "Joy Creator", options: p.position && !POSITIONS.includes(p.position) ? [...POSITIONS, p.position] : POSITIONS }, { id: "phone", label: "Phone (optional)", type: "tel", value: p.phone }],
       { id: "role", label: "Access", type: "select", value: p.role, options: p.role === "owner" && !OWNER ? [["owner", "Owner"]] : roleOpts, disabled: !canRole || p.id === me.id && p.role === "owner" },
       { id: "active", label: "Active (uncheck when someone leaves; they can no longer see manager info)", type: "checkbox", value: p.active }],
     onSubmit: v => write("profiles", "update", v, p.id)
@@ -694,7 +694,7 @@ function inviteForm() {
   openForm({
     title: "Invite a team member", submit: "Send invite", done: "Invite sent",
     fields: [{ id: "name", label: "Name", required: true }, { id: "email", label: "Email", type: "email", required: true, ph: "They'll get a link to set a password" },
-      [{ id: "position", label: "Position", type: "select", value: "Front of house", options: POSITIONS }, { id: "role", label: "Access", type: "select", value: "staff", options: OWNER ? [["staff", "Staff"], ["manager", "Manager"]] : [["staff", "Staff"]] }]],
+      [{ id: "position", label: "Position", type: "select", value: "Joy Creator", options: POSITIONS }, { id: "role", label: "Access", type: "select", value: "staff", options: OWNER ? [["staff", "Staff"], ["manager", "Manager"]] : [["staff", "Staff"]] }]],
     onSubmit: async v => {
       const { data, error } = await sb.functions.invoke("invite-user", { body: { ...v, redirectTo: location.origin + location.pathname } });
       if (error) { let msg = error.message; try { const j = await error.context.json(); msg = j.error || msg; } catch (e) { } return { error: msg }; }
