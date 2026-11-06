@@ -1,18 +1,18 @@
-/* Texarkana Bakery Hub - web app (no build step). Talks to Supabase. */
 (function () {
-"use strict";
+"/* Texarkana Bakery Hub - web app (no build step). Talks to Supabase. */
+use strict";
 const CFG = window.BAKERY_CONFIG || {};
 const INITIAL_HASH = location.hash; // read before Supabase consumes invite/recovery tokens
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY);
 
-const REM_CATS = ["Food safety", "Ordering", "Equipment", "Cleaning", "Payroll & admin", "Events", "Other"];
+const REM_CATS = ["Food safety", "Ordering", "Equipment", "Cleaning", "Payroll & admin", "Events", "NBU", "Other"];
 const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
 const POSITIONS = ["Joy Creator", "Froster", "Baker", "Utility", "Shift Lead", "Key Holder", "Offsite Event", "Manager", "Owner"];
 function splitPos(s) { return String(s || "").split(/\s*[,\/]\s*/).map(x => x.trim()).filter(Boolean); }
 function posOptions(cur) { const extra = splitPos(cur).filter(x => !POSITIONS.includes(x)); return [...POSITIONS, ...extra]; }
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
-const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], cal: [], sales: [], hourly: [], items: [], synclog: [] };
+const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], cal: [], docs: [], sales: [], hourly: [], items: [], synclog: [] };
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
@@ -62,10 +62,11 @@ const LOADERS = {
   cal: () => sb.from("cal_events").select("*").gte("end_at", new Date(Date.now() - 45 * 864e5).toISOString()).order("start_at").limit(5000),
   tshifts: () => sb.from("toast_shifts").select("*").gte("start_at", new Date(Date.now() - 21 * 864e5).toISOString()).order("start_at").limit(3000),
   shifts: () => sb.from("shifts").select("*").gte("date", ymd(addDays(new Date(), -120))).lte("date", ymd(addDays(new Date(), 180))),
+  docs: () => sb.from("documents").select("*").order("week_start", { ascending: false, nullsFirst: false }).order("created_at", { ascending: false }).limit(300),
   sales: () => sb.from("sales_daily").select("*").order("business_date", { ascending: false }).limit(400),
   synclog: () => sb.from("sync_log").select("*").order("ran_at", { ascending: false }).limit(5),
 };
-const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", cal_events: "cal", sales_daily: "sales" };
+const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", cal_events: "cal", documents: "docs", sales_daily: "sales" };
 async function load(key) {
   if ((key === "sales" || key === "synclog") && !MGR) return;
   const data = await q(LOADERS[key](), "load " + key);
@@ -226,6 +227,7 @@ function vToday() {
   ${unread ? `<div class="banner">You have ${unread} unread private message${unread > 1 ? "s" : ""}. <a href="#messages" data-act="openPrivate" style="color:inherit">Open messages</a></div>` : ""}
   ${MGR && sd ? `<div class="kpis">${kpi("Net sales so far", money(sd.net_sales))}${kpi("Labor %", sd.net_sales > 0 ? pct(sd.labor_cost / sd.net_sales * 100) : "–", laborClass(sd))}${kpi("Orders", sd.order_count)}</div>` : ""}
   <div class="grid">
+    ${nbuCard()}
     <section class="card"><h3>Today's calendar</h3>
       ${od.length ? `<div class="small" style="color:var(--crit);font-weight:700;margin-bottom:4px">Overdue</div><div class="list" style="margin-bottom:10px">${od.map(r => remRow(r, r.date, true)).join("")}</div>` : ""}
       ${todays.length ? `<div class="list">${todays.map(r => remRow(r, t)).join("")}</div>` : `<div class="empty">Nothing due today.</div>`}
@@ -789,9 +791,339 @@ function inviteForm() {
   });
 }
 
+/* ---------------- NBU & guides ---------------- */
+/* NBU-READER-START: reads a PDF (pages, text, links, key dates) with pdf.js */
+const PDFJS_URL = CFG.PDFJS_URL || "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
+let pdfjsP = null;
+function pdfjs() {
+  if (!pdfjsP) pdfjsP = import(PDFJS_URL + "pdf.min.mjs").then(L => { L.GlobalWorkerOptions.workerSrc = PDFJS_URL + "pdf.worker.min.mjs"; return L; }).catch(e => { pdfjsP = null; throw e; });
+  return pdfjsP;
+}
+function unwrapUrl(u) {
+  try { const x = new URL(u); if (/(^|\.)safelinks\.protection\.outlook\.com$/i.test(x.hostname) && x.searchParams.get("url")) return x.searchParams.get("url"); } catch (e) { }
+  return u;
+}
+function safeUrl(u) { u = unwrapUrl(String(u || "")); return /^https?:\/\//i.test(u) ? u : ""; }
+const MD = "(\\d{1,2})\\/(\\d{1,2})(?:\\/(\\d{2,4}))?";
+const KEY_RE = new RegExp("^" + MD + "(?:\\s*[-–—]\\s*" + MD + ")?\\s*:\\s*(.+)$");
+function normT(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
+function fullYear(y) { y = Number(y); return y < 100 ? 2000 + y : y; }
+function nearDate(m, d, ref) { let best = null; for (const y of [ref.getFullYear() - 1, ref.getFullYear(), ref.getFullYear() + 1]) { const t = new Date(y, m - 1, d); if (!best || Math.abs(t - ref) < Math.abs(best - ref)) best = t; } return best; }
+function isHeading(t) { const L = t.replace(/[^A-Za-z]/g, ""); return L.length >= 3 && !/\d/.test(t) && L.replace(/[^A-Z]/g, "").length / L.length > 0.85; }
+function joinItems(items) { let out = "", end = null; for (const it of items) { if (end != null && it.x - end > 1 && !/\s$/.test(out) && !/^\s/.test(it.s)) out += " "; out += it.s; end = it.x + it.w; } return out.replace(/\s+/g, " ").trim(); }
+function toLines(items) {
+  const lines = [];
+  items.slice().sort((a, b) => b.y - a.y || a.x - b.x).forEach(it => { const L = lines[lines.length - 1]; if (L && Math.abs(L.y - it.y) <= Math.max(2, it.h * 0.4)) L.items.push(it); else lines.push({ y: it.y, items: [it] }); });
+  lines.forEach(l => { l.items.sort((a, b) => a.x - b.x); l.text = joinItems(l.items); });
+  return lines.filter(l => l.text);
+}
+async function readPdf(pdf) {
+  const pages = [];
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const pg = await pdf.getPage(n), vp = pg.getViewport({ scale: 1 });
+    const tc = await pg.getTextContent();
+    const items = tc.items.map(i => ({ ...i, str: String(i.str || "").replace(/[\uE000-\uF8FF]/g, "") })).filter(i => i.str.trim()).map(i => ({ s: i.str, x: i.transform[4], y: i.transform[5], w: i.width, h: Math.abs(i.transform[3]) || i.height || 10 }));
+    const links = (await pg.getAnnotations()).filter(a => a.subtype === "Link" && safeUrl(a.url || a.unsafeUrl)).map(a => ({ url: safeUrl(a.url || a.unsafeUrl), rect: a.rect }));
+    // A column of dates down the right side (the NBU's KEY DATES) means a two-column page
+    const dx = items.filter(i => i.x > vp.width * 0.5 && /^\d{1,2}\/\d{1,2}/.test(i.s.trim())).map(i => i.x);
+    const colX = dx.length >= 3 ? Math.min(...dx) - 4 : null;
+    const cols = colX ? [items.filter(i => i.x < colX), items.filter(i => i.x >= colX)] : [items];
+    pages.push({ n, w: vp.width, h: vp.height, colX, cols: cols.map(toLines), links });
+  }
+  return pages;
+}
+function findKeyDates(pages, ref) {
+  const out = [];
+  const toYmd = (m, d, y, r) => ymd(y ? new Date(fullYear(y), m - 1, d) : nearDate(m, d, r));
+  pages.forEach(p => p.cols.forEach(lines => {
+    const head = lines.findIndex(l => /^key dates$/i.test(l.text));
+    let cur = null, stop = false;
+    lines.forEach((l, i) => {
+      if (stop || (head >= 0 && i <= head)) return;
+      const m = l.text.match(KEY_RE);
+      if (m) {
+        const [, m1, d1, y1, m2, d2, y2, title] = m;
+        let start, end = null;
+        if (m2) { end = toYmd(+m2, +d2, y2, ref); start = y1 ? toYmd(+m1, +d1, y1) : ymd(new Date(parse(end).getFullYear() - (+m1 > +m2 ? 1 : 0), +m1 - 1, +d1)); }
+        else start = toYmd(+m1, +d1, y1, ref);
+        cur = { start, end, title: title.trim() }; out.push(cur); return;
+      }
+      if (head < 0 || !cur) return;
+      if (isHeading(l.text)) { cur = null; stop = true; return; }
+      cur.title += " " + l.text;
+    });
+  }));
+  out.forEach(k => k.title = k.title.replace(/\s+/g, " ").replace(/[\s.;,]+$/, ""));
+  return out.filter((k, i) => out.findIndex(o => o.start === k.start && o.end === k.end && o.title === k.title) === i);
+}
+const GENERIC_LINK = /^(here|click here|register( now)?|learn more|link|this link|view|more)[.!]*$/i;
+function findLinks(pages) {
+  const by = new Map();
+  pages.forEach(p => p.links.forEach(ln => {
+    const [x1, y1, x2, y2] = ln.rect;
+    const ci = p.colX == null ? 0 : ((x1 + x2) / 2 >= p.colX ? 1 : 0), lines = p.cols[ci];
+    let e = by.get(ln.url); if (!e) { e = { url: ln.url, page: p.n, hits: [], lines: null }; by.set(ln.url, e); }
+    lines.forEach((l, li) => {
+      // an item counts when most of its height sits inside the link box
+      const hit = l.items.filter(i => i.x + i.w > x1 + 0.5 && i.x < x2 - 0.5 && Math.min(i.y + i.h, y2) - Math.max(i.y - i.h * 0.2, y1) > i.h * 0.5);
+      hit.forEach(i => { if (!e.hits.some(h => h.i === i)) e.hits.push({ i, li }); });
+      if (hit.length && !e.lines) e.lines = { lines, li, x: Math.min(...hit.map(i => i.x)) };
+    });
+  }));
+  const clean = t => t.replace(/^[^A-Za-z0-9(]+/, "").replace(/[\s•]+$/, "").trim();
+  return [...by.values()].map(e => {
+    const raw = clean(joinItems(e.hits.sort((a, b) => a.li - b.li || a.i.x - b.i.x).map(h => h.i)));
+    let label = raw, ctx = "";
+    if (e.lines) {
+      const { lines, li, x } = e.lines, prev = li > 0 ? lines[li - 1].text : "", next = lines[li + 1] ? lines[li + 1].text : "";
+      for (let k = li; k >= 0; k--) {
+        const t = clean(lines[k].text);
+        if (/^(REMINDER|NEW|UPDATE|IMPORTANT)!/i.test(t) || (k < li && isHeading(t) && !GENERIC_LINK.test(t))) { ctx = t.replace(/^(REMINDER|NEW|UPDATE|IMPORTANT)!\s*/i, "").split(/\s[–—-]\s/)[0].trim(); break; }
+      }
+      if (GENERIC_LINK.test(raw) || raw.length < 4) {
+        // use the sentence the link sits in, e.g. "The contest rules can be found here."
+        const t = (prev && !/[.!?:]$/.test(prev) && !isHeading(prev) ? prev + " " : (prev && /[.!?]$/.test(prev) && !isHeading(prev) ? prev + " " : "")) + lines[li].text;
+        const end = t.toLowerCase().lastIndexOf(raw.toLowerCase());
+        if (end >= 0) { const before = t.slice(0, end); const m = before.match(/^.*[.!?:]\s/s); label = clean(t.slice(m ? m[0].length : 0, end + raw.length)); }
+        if (GENERIC_LINK.test(label)) label = (ctx ? ctx + ": " : "") + raw.replace(/[.!]+$/, "");
+      } else if (raw.length < 16) {
+        // a short start, e.g. "(ezManage" - take the rest of the line (and the next if a bracket is still open)
+        let t = joinItems(lines[li].items.filter(i => i.x >= x - 0.5));
+        if ((t.match(/\(/g) || []).length > (t.match(/\)/g) || []).length && next) t += " " + next;
+        label = clean(t.replace(/[()]/g, " ").replace(/\s+/g, " "));
+      }
+    }
+    if (label.length > 110) label = label.slice(0, 107).replace(/\s+\S*$/, "") + "…";
+    return { label: label || e.url, url: e.url, page: e.page, ctx: normT(ctx) === normT(label) ? "" : ctx.slice(0, 70) };
+  });
+}
+function findWeek(pages, fileName) {
+  const all = pages.flatMap(p => p.cols.flatMap(ls => ls.map(l => l.text))).join("\n");
+  let m = all.match(new RegExp("CONTENT APPLICABLE\\s*" + MD + "\\s*[-–—]\\s*" + MD, "i"));
+  if (!m) m = String(fileName || "").match(/(\d{1,2})[.\-_](\d{1,2})[.\-_](\d{2,4})\s*[-–_]\s*(\d{1,2})[.\-_](\d{1,2})[.\-_](\d{2,4})/);
+  if (!m) return null;
+  const [, m1, d1, y1, m2, d2, y2] = m;
+  const end = y2 ? new Date(fullYear(y2), +m2 - 1, +d2) : nearDate(+m2, +d2, new Date());
+  const start = y1 ? new Date(fullYear(y1), +m1 - 1, +d1) : new Date(end.getFullYear() - (+m1 > +m2 ? 1 : 0), +m1 - 1, +d1);
+  return { start: ymd(start), end: ymd(end) };
+}
+async function analyzePdf(pdf, fileName) {
+  const pages = await readPdf(pdf);
+  const week = findWeek(pages, fileName);
+  const ref = week ? parse(week.start) : new Date();
+  return {
+    week, pages: pdf.numPages,
+    key_dates: findKeyDates(pages, ref),
+    links: findLinks(pages),
+    body: pages.map(p => p.cols.map(ls => ls.map(l => l.text).join("\n")).join("\n\n")).join("\n\n").slice(0, 200000)
+  };
+}
+async function renderPdfInto(el, pdf) {
+  el.innerHTML = "";
+  const w = Math.max(280, el.clientWidth || 800), dpr = Math.min(window.devicePixelRatio || 1, 2);
+  for (let n = 1; n <= pdf.numPages; n++) {
+    const pg = await pdf.getPage(n), base = pg.getViewport({ scale: 1 }), vp = pg.getViewport({ scale: w / base.width });
+    const box = document.createElement("div"); box.className = "pdfpage"; box.style.aspectRatio = base.width + " / " + base.height;
+    const c = document.createElement("canvas"); c.width = Math.floor(vp.width * dpr); c.height = Math.floor(vp.height * dpr);
+    c.setAttribute("role", "img"); c.setAttribute("aria-label", "Page " + n + " of " + pdf.numPages);
+    box.appendChild(c); el.appendChild(box);
+    await pg.render({ canvasContext: c.getContext("2d"), viewport: pg.getViewport({ scale: w / base.width * dpr }) }).promise;
+    for (const a of await pg.getAnnotations()) {
+      const url = a.subtype === "Link" && safeUrl(a.url || a.unsafeUrl); if (!url) continue;
+      const [x1, y1, x2, y2] = typeof vp.convertToViewportRectangle === "function" ? vp.convertToViewportRectangle(a.rect)
+        : (([a0, b0, a1, b1], [v0, , , v3]) => [(a0 - v0) * vp.scale, (v3 - b0) * vp.scale, (a1 - v0) * vp.scale, (v3 - b1) * vp.scale])(a.rect, pg.view);
+      const L = document.createElement("a"); L.href = url; L.target = "_blank"; L.rel = "noopener noreferrer"; L.title = url; L.setAttribute("aria-label", "Open link: " + url);
+      L.style.cssText = `left:${Math.min(x1, x2) / vp.width * 100}%;top:${Math.min(y1, y2) / vp.height * 100}%;width:${Math.abs(x2 - x1) / vp.width * 100}%;height:${Math.abs(y2 - y1) / vp.height * 100}%`;
+      box.appendChild(L);
+    }
+  }
+}
+/* NBU-READER-END */
+
+const DOC_KINDS = { nbu: "NBU", srg: "Seasonal Readiness Guide", other: "Document" };
+let docOpen = "", docQ = "", docPending = null;
+const docCache = {};
+function shortD(s) { return s ? fmtDate(s, { month: "numeric", day: "numeric" }) : ""; }
+function docRange(d) { return d.week_start ? (d.week_end && d.week_end !== d.week_start ? shortD(d.week_start) + "–" + shortD(d.week_end) : shortD(d.week_start)) : ""; }
+function currentNbu() { const t = today(); return S.docs.filter(d => d.kind === "nbu" && (d.week_end || d.week_start) >= t).sort((a, b) => a.week_start.localeCompare(b.week_start))[0] || null; }
+function onCal(date, title) { return S.reminders.some(r => r.date === date && normT(r.title) === normT(title)); }
+const REMINDERISH = /\b(due|deadline|training|submit|register|registration|cto|call-to-order|order)\b/i;
+function calPlan(keyDates, label) {
+  const t = today(), out = [];
+  const add = (date, title, kind) => out.push({ date, title, kind, priority: kind === "reminder" ? "critical" : "normal", dup: onCal(date, title) });
+  (keyDates || []).forEach(k => {
+    const rem = REMINDERISH.test(k.title);
+    if (!k.end) add(k.start, k.title, rem ? "reminder" : "event");
+    else if (rem) { add(k.start, k.title + " starts", "event"); add(k.end, /\bdue\b/i.test(k.title) ? k.title : k.title + " due", "reminder"); }
+    else if ((parse(k.end) - parse(k.start)) / 864e5 <= 7) add(k.start, `${k.title} (${shortD(k.start)}–${shortD(k.end)})`, "event");
+    else { add(k.start, k.title + " starts", "event"); add(k.end, k.title + " ends", "event"); }
+  });
+  out.forEach(p => { p.checked = !p.dup && p.date >= t; p.notes = "From " + label + ". See the NBU tab for details and links."; });
+  return out.sort((a, b) => a.date.localeCompare(b.date));
+}
+function planHtml(plan) {
+  if (!plan.length) return `<div class="small muted">No key dates found to add to the calendar.</div>`;
+  return `<div class="small" style="font-weight:600;color:var(--muted);margin-bottom:6px">Add these to the calendar</div><div class="list plan">${plan.map((p, i) => `<label class="item" for="pl_${i}" style="cursor:pointer"><input type="checkbox" class="check" id="pl_${i}" data-i="${i}" ${p.checked ? "checked" : ""}>
+    <div class="grow"><div class="t">${esc(p.title)}</div><div class="row small muted" style="gap:6px;margin-top:2px"><span>${esc(fmtDate(p.date))}</span>${p.kind === "event" ? '<span class="chip acc">Event</span>' : '<span class="chip crit">Reminder</span>'}${p.dup ? '<span class="chip ok">Already on calendar</span>' : p.date < today() ? '<span class="chip">Past</span>' : ""}</div></div></label>`).join("")}</div>`;
+}
+function planRows(form, plan, docId) {
+  return [...form.querySelectorAll(".plan input[data-i]:checked")].map(el => plan[+el.dataset.i]).map(p => ({ kind: p.kind, title: p.title, date: p.date, priority: p.priority, category: "NBU", notes: p.notes, repeat: "none", doc_id: docId }));
+}
+function docLinkRow(l, d) {
+  let host = ""; try { host = new URL(l.url).hostname.replace(/^www\./, ""); } catch (e) { }
+  return `<div class="item"><span class="lk" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></svg></span><div class="grow">
+    <a class="t" href="${esc(l.url)}" target="_blank" rel="noopener noreferrer">${esc(l.label)}</a>
+    <div class="small muted" style="margin-top:2px">${l.ctx ? esc(l.ctx) + " · " : ""}${esc(host)}${d ? ` · <button class="link" data-act="docOpen" data-id="${d.id}">${esc(d.title)}</button>` : ""}</div></div></div>`;
+}
+function keyDateRow(k) {
+  const when = k.end ? `${fmtDate(k.start, { month: "short", day: "numeric" })} – ${fmtDate(k.end, { month: "short", day: "numeric" })}` : fmtDate(k.start);
+  const past = (k.end || k.start) < today();
+  return `<div class="item ${past ? "done" : ""}"><div class="kd">${esc(when)}</div><div class="grow t">${esc(k.title)}</div></div>`;
+}
+function hilite(text, q) {
+  const i = text.toLowerCase().indexOf(q.toLowerCase()); if (i < 0) return esc(text.slice(0, 140));
+  const a = Math.max(0, i - 60), s = text.slice(a, i + q.length + 90).replace(/\s+/g, " ");
+  const j = s.toLowerCase().indexOf(q.toLowerCase());
+  return (a ? "…" : "") + esc(s.slice(0, j)) + "<mark>" + esc(s.slice(j, j + q.length)) + "</mark>" + esc(s.slice(j + q.length)) + "…";
+}
+function vDocs() {
+  const d = docOpen && S.docs.find(x => x.id === docOpen);
+  if (d) return vDoc(d);
+  docOpen = "";
+  const q = docQ.trim(), ql = q.toLowerCase();
+  const head = `<div class="head"><h2>NBU &amp; Guides</h2>${MGR ? `<button class="primary" data-act="docNew">Add NBU or guide</button>` : ""}</div>
+    <label class="f" for="docQ" style="max-width:520px">Search every NBU and guide<input id="docQ" type="search" placeholder="e.g. holiday hours, CTO, signage" value="${esc(docQ)}"></label>`;
+  if (!S.docs.length) return head + `<div class="empty">${MGR ? "No NBUs yet. Tap “Add NBU or guide” and choose the PDF." : "No NBUs posted yet."}</div>`;
+  if (q) {
+    const links = S.docs.flatMap(x => (x.links || []).filter(l => (l.label + " " + l.ctx).toLowerCase().includes(ql)).map(l => [l, x])).slice(0, 30);
+    const hits = S.docs.filter(x => (x.title + "\n" + (x.body || "")).toLowerCase().includes(ql));
+    return head + `<div class="grid">
+      <section class="card"><h3>Matching links</h3>${links.length ? `<div class="list">${links.map(([l, x]) => docLinkRow(l, x)).join("")}</div>` : `<div class="empty">No links match “${esc(q)}”.</div>`}</section>
+      <section class="card"><h3>Mentioned in</h3>${hits.length ? `<div class="list">${hits.map(x => `<div class="item"><div class="grow"><button class="link t" data-act="docOpen" data-id="${x.id}">${esc(x.title)}</button><div class="small muted" style="margin-top:2px">${hilite(x.body || x.title, q)}</div></div></div>`).join("")}</div>` : `<div class="empty">Nothing mentions “${esc(q)}”.</div>`}</section></div>`;
+  }
+  const cur = currentNbu(), t = today();
+  const row = x => `<div class="item"><div class="grow"><button class="link t" data-act="docOpen" data-id="${x.id}">${esc(x.title)}</button>
+    <div class="row small muted" style="gap:6px;margin-top:2px">${x.week_start ? `<span>${esc(docRange(x))}</span>` : ""}${cur && cur.id === x.id ? `<span class="chip acc">${x.week_start <= t ? "This week" : "Next up"}</span>` : ""}<span>${(x.links || []).length} links</span><span>${(x.key_dates || []).length} key dates</span></div></div></div>`;
+  const group = (k, label) => { const L = S.docs.filter(x => x.kind === k); return L.length ? `<section class="card"><h3>${label}</h3><div class="list">${L.map(row).join("")}</div></section>` : ""; };
+  return head + `<div class="grid">${group("nbu", "Nothing Bundt Updates (NBU)")}${group("srg", "Seasonal Readiness Guides")}${group("other", "Other documents")}</div>`;
+}
+function vDoc(d) {
+  const kd = (d.key_dates || []).slice().sort((a, b) => a.start.localeCompare(b.start));
+  return `<div class="head"><button class="ghost sm" data-act="docBack">← All NBUs &amp; guides</button></div>
+  <div class="head"><div style="margin-right:auto"><h2 style="margin:0">${esc(d.title)}</h2><div class="small muted">${esc(DOC_KINDS[d.kind] || "Document")}${d.week_start ? " · " + esc(docRange(d)) : ""} · posted ${esc(ago(d.created_at))} by ${esc(nameOf(d.created_by))}</div></div>
+    <button data-act="docPdf" data-id="${d.id}">Open PDF</button>${MGR ? `<button data-act="docCal" data-id="${d.id}">Add dates to calendar</button><button class="danger" data-act="docDel" data-id="${d.id}">Delete</button>` : ""}</div>
+  <div class="grid">
+    <section class="card"><h3>Key dates</h3>${kd.length ? `<div class="list">${kd.map(keyDateRow).join("")}</div>` : `<div class="empty">No key dates found.</div>`}</section>
+    <section class="card"><h3>Links${(d.links || []).length ? ` (${d.links.length})` : ""}</h3>${(d.links || []).length ? `<div class="list">${d.links.map(l => docLinkRow(l)).join("")}</div>` : `<div class="empty">No links in this one.</div>`}</section>
+  </div>
+  <section class="card" style="margin-top:16px"><h3>Full ${esc(d.kind === "nbu" ? "NBU" : "document")}</h3><p class="small muted" style="margin-top:-4px">Tap any link on the pages to open it.</p><div id="pdfView" class="pdfview"><div class="empty">Loading pages…</div></div></section>`;
+}
+async function pdfFor(d) {
+  if (docCache[d.id] && docCache[d.id].pdf) return docCache[d.id].pdf;
+  const { data, error } = await sb.storage.from("documents").download(d.file_path);
+  if (error) throw error;
+  const L = await pdfjs();
+  const pdf = await L.getDocument({ data: new Uint8Array(await data.arrayBuffer()) }).promise;
+  (docCache[d.id] = docCache[d.id] || {}).pdf = pdf;
+  return pdf;
+}
+function attachViewer() {
+  const slot = $("pdfView"); if (!slot || !docOpen) return;
+  const d = S.docs.find(x => x.id === docOpen); if (!d) return;
+  const c = docCache[d.id] = docCache[d.id] || {};
+  if (c.el) { slot.replaceWith(c.el); return; }
+  c.el = slot;
+  pdfFor(d).then(pdf => renderPdfInto(c.el, pdf)).catch(e => { console.error(e); c.el.innerHTML = `<div class="empty">Couldn't show the pages here (${esc(e.message || "error")}). Use “Open PDF” instead.</div>`; delete c.el; });
+}
+function docUpload() {
+  docPending = null;
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="docDlg" novalidate><h3>Add an NBU or guide</h3>
+    <label class="f" for="docKind">What is it?<select id="docKind"><option value="nbu">NBU (weekly update)</option><option value="srg">Seasonal Readiness Guide</option><option value="other">Other document</option></select></label>
+    <label class="f" for="docFile">PDF file<input id="docFile" type="file" accept="application/pdf,.pdf"></label>
+    <p class="small muted" style="margin:-4px 0 0">Use the PDF from the email, not a screenshot, so the links still work.</p>
+    <div id="docReview"></div><div class="err" id="docErr"></div>
+    <div class="row" style="justify-content:flex-end"><button type="button" data-act="close">Cancel</button><button class="primary" type="submit" id="docOk" disabled>Post it</button></div></form></div>`;
+  const form = $("docDlg");
+  $("docFile").addEventListener("change", () => readUpload());
+  $("docKind").addEventListener("change", () => { if (docPending) readUpload(); });
+  form.addEventListener("submit", async e => { e.preventDefault(); await saveUpload(form); });
+}
+async function readUpload() {
+  const f = $("docFile").files[0], kind = $("docKind").value, box = $("docReview"); $("docErr").textContent = ""; $("docOk").disabled = true;
+  if (!f) { box.innerHTML = ""; return; }
+  if (!/pdf$/i.test(f.type) && !/\.pdf$/i.test(f.name)) { $("docErr").textContent = "Choose a PDF file."; return; }
+  if (f.size > 50 * 1024 * 1024) { $("docErr").textContent = "That file is over 50 MB. Try a smaller copy."; return; }
+  box.innerHTML = `<div class="empty">Reading the PDF…</div>`;
+  try {
+    const L = await pdfjs();
+    const pdf = await L.getDocument({ data: new Uint8Array(await f.arrayBuffer()) }).promise;
+    const info = await analyzePdf(pdf, f.name);
+    const base = f.name.replace(/\.pdf$/i, "").replace(/[_]+/g, " ").trim();
+    const title = kind === "nbu" && info.week ? `NBU ${shortD(info.week.start)}–${shortD(info.week.end)}` : base;
+    const plan = calPlan(info.key_dates, title);
+    docPending = { file: f, kind, info, plan, pdf };
+    box.innerHTML = `<label class="f" for="docTitle">Title<input id="docTitle" value="${esc(title)}" required></label>
+      <div class="two"><label class="f" for="docWs">${kind === "nbu" ? "Week starts" : "Starts (optional)"}<input id="docWs" type="date" value="${info.week ? info.week.start : ""}"></label>
+      <label class="f" for="docWe">${kind === "nbu" ? "Week ends" : "Ends (optional)"}<input id="docWe" type="date" value="${info.week ? info.week.end : ""}"></label></div>
+      <div class="small muted" style="margin-bottom:10px">Found ${info.pages} page${info.pages === 1 ? "" : "s"}, ${info.links.length} link${info.links.length === 1 ? "" : "s"} and ${info.key_dates.length} key date${info.key_dates.length === 1 ? "" : "s"}.</div>
+      ${planHtml(plan)}`;
+    $("docOk").disabled = false;
+  } catch (e) { console.error(e); box.innerHTML = ""; $("docErr").textContent = "Couldn't read that PDF: " + (e.message || e); }
+}
+async function saveUpload(form) {
+  const p = docPending; if (!p) return;
+  const title = $("docTitle").value.trim(); if (!title) { $("docTitle").focus(); $("docErr").textContent = "Give it a title."; return; }
+  if (p.kind === "nbu" && !$("docWs").value) { $("docWs").focus(); $("docErr").textContent = "Pick the week it covers."; return; }
+  $("docOk").disabled = true; $("docOk").textContent = "Posting…";
+  const fail = m => { $("docErr").textContent = m; $("docOk").disabled = false; $("docOk").textContent = "Post it"; };
+  const path = `${p.kind}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pdf`;
+  const up = await sb.storage.from("documents").upload(path, p.file, { contentType: "application/pdf", upsert: false });
+  if (up.error) return fail("Couldn't upload the PDF: " + up.error.message);
+  const ws = $("docWs").value || null, we = $("docWe").value || ws;
+  const { data, error } = await sb.from("documents").insert({ kind: p.kind, title, week_start: ws, week_end: we, file_path: path, pages: p.info.pages, links: p.info.links, key_dates: p.info.key_dates, body: p.info.body }).select("id").single();
+  if (error) { await sb.storage.from("documents").remove([path]); return fail("Couldn't save: " + error.message); }
+  const rows = planRows(form, p.plan.map(x => ({ ...x, notes: "From " + title + ". See the NBU tab for details and links." })), data.id);
+  if (rows.length) { const r = await sb.from("reminders").insert(rows); if (r.error) toast("Posted, but couldn't add the dates: " + r.error.message); else scheduleReload("reminders"); }
+  docCache[data.id] = { pdf: p.pdf };
+  docPending = null; closeModal(); scheduleReload("docs");
+  toast(rows.length ? `Posted, and ${rows.length} date${rows.length > 1 ? "s" : ""} added to the calendar` : "Posted");
+  docOpen = data.id; if (view !== "nbu") location.hash = "#nbu";
+}
+function docCalForm(d) {
+  const plan = calPlan(d.key_dates, d.title);
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="dcDlg" novalidate><h3>Add ${esc(d.title)} dates to the calendar</h3>${planHtml(plan)}<div class="err" id="dcErr"></div>
+    <div class="row" style="justify-content:flex-end"><button type="button" data-act="close">Cancel</button><button class="primary" type="submit" id="dcOk" ${plan.length ? "" : "disabled"}>Add to calendar</button></div></form></div>`;
+  $("dcDlg").addEventListener("submit", async e => {
+    e.preventDefault(); const rows = planRows(e.target, plan, d.id);
+    if (!rows.length) { $("dcErr").textContent = "Check at least one date."; return; }
+    $("dcOk").disabled = true;
+    if (await write("reminders", "insert", rows)) { closeModal(); toast(`${rows.length} date${rows.length > 1 ? "s" : ""} added to the calendar`); } else $("dcOk").disabled = false;
+  });
+}
+async function docDelete(d) {
+  const { error } = await sb.from("documents").delete().eq("id", d.id);
+  if (error) { toast(error.message.includes("row-level security") ? "You don't have permission to do that." : "Couldn't delete: " + error.message); return; }
+  await sb.storage.from("documents").remove([d.file_path]);
+  delete docCache[d.id]; docOpen = ""; scheduleReload("docs"); toast("Deleted. Calendar dates it added are kept.");
+}
+async function docPdfOpen(d) {
+  const w = window.open("", "_blank");
+  const { data, error } = await sb.storage.from("documents").createSignedUrl(d.file_path, 3600);
+  if (error || !data) { if (w) w.close(); toast("Couldn't open the PDF: " + (error ? error.message : "")); return; }
+  if (w) w.location.href = data.signedUrl; else location.href = data.signedUrl;
+}
+function nbuCard() {
+  const d = currentNbu(); if (!d) return "";
+  const t = today(), soon = ymd(addDays(new Date(), 14));
+  const kd = (d.key_dates || []).filter(k => (k.end || k.start) >= t && k.start <= soon).sort((a, b) => a.start.localeCompare(b.start)).slice(0, 5);
+  return `<section class="card"><h3>${d.week_start <= t ? "This week's NBU" : "Next week's NBU"} <span class="small muted" style="font-weight:500">${esc(docRange(d))}</span></h3>
+    ${kd.length ? `<div class="list">${kd.map(keyDateRow).join("")}</div>` : `<div class="empty">No key dates in the next two weeks.</div>`}
+    <a class="btn" href="#nbu" data-act="docOpen" data-id="${d.id}" style="display:inline-block;margin-top:8px;text-decoration:none">Open the NBU</a></section>`;
+}
+
 /* ---------------- render ---------------- */
 function views() {
-  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
+  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["nbu", "NBU"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
 }
 function renderTabs() {
   const t = today();
@@ -807,10 +1139,11 @@ function render() {
   if (!me) return;
   renderTabs();
   const main = $("main");
-  const keep = ["msgText", "dmText", "invQ"].map(id => { const el = $(id); return el ? [id, el.value, el === document.activeElement, el.selectionStart] : null; }).filter(Boolean);
-  const fn = { today: vToday, sales: vSales, calendar: vCalendar, messages: vMessages, inventory: vInventory, orders: vOrders, schedule: vSchedule, team: vTeam }[view] || vToday;
+  const keep = ["msgText", "dmText", "invQ", "docQ"].map(id => { const el = $(id); return el ? [id, el.value, el === document.activeElement, el.selectionStart] : null; }).filter(Boolean);
+  const fn = { today: vToday, sales: vSales, calendar: vCalendar, nbu: vDocs, messages: vMessages, inventory: vInventory, orders: vOrders, schedule: vSchedule, team: vTeam }[view] || vToday;
   const ae = document.activeElement, cntFocus = ae && ae.id && ae.id.startsWith("cnt_") ? ae.id : null;
   main.innerHTML = fn();
+  if (view === "nbu") attachViewer();
   if (cntFocus) { const el = $(cntFocus); if (el) el.focus(); }
   keep.forEach(([id, val, focused, pos]) => { const el = $(id); if (!el) return; el.value = val; if (focused) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) { } } });
   const th = $("thread"); if (th) th.scrollTop = th.scrollHeight;
@@ -863,6 +1196,12 @@ document.addEventListener("click", async e => {
     case "wkThis": weekStart = monday(new Date()); render(); break;
     case "wkCopy": copyLastWeek(); break;
     case "invite": inviteForm(); break;
+    case "docNew": docUpload(); break;
+    case "docOpen": docOpen = id; if (view === "nbu") { render(); window.scrollTo(0, 0); } break;
+    case "docBack": docOpen = ""; render(); window.scrollTo(0, 0); break;
+    case "docPdf": { const d = S.docs.find(x => x.id === id); if (d) docPdfOpen(d); break; }
+    case "docCal": { const d = S.docs.find(x => x.id === id); if (d) docCalForm(d); break; }
+    case "docDel": { const d = S.docs.find(x => x.id === id); if (!d) break; if (b.dataset.armed) docDelete(d); else { b.dataset.armed = "1"; b.textContent = "Tap again to delete"; } break; }
     case "editMe": meForm(); break;
     case "personEdit": personForm(person(id)); break;
     case "salesPick": salesDate = b.dataset.date; await loadSalesDetail(); render(); break;
@@ -893,6 +1232,7 @@ document.addEventListener("change", async e => {
 });
 document.addEventListener("input", e => {
   if (e.target.id === "invQ") { invF.q = e.target.value; render(); }
+  if (e.target.id === "docQ") { docQ = e.target.value; render(); }
   if (e.target.classList && e.target.classList.contains("cnt")) {
     countDraft[e.target.dataset.id] = e.target.value;
     const n = $("countN"); if (n) n.textContent = Object.values(countDraft).filter(v => String(v).trim() !== "").length;
@@ -967,7 +1307,7 @@ async function startAppInner() {
   if (!me.active) { await sb.auth.signOut(); showAuth("login", "Your account has been turned off. Talk to a manager."); return; }
   $("authView").hidden = true; $("appView").hidden = false;
   $("main").innerHTML = `<div class="empty">Loading…</div>`;
-  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "cal", "sales", "synclog"].map(load));
+  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "cal", "docs", "sales", "synclog"].map(load));
   if (!booted) {
     booted = true;
     channel = sb.channel("hub");
