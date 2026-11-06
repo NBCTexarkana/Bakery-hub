@@ -7,7 +7,9 @@ const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY);
 
 const REM_CATS = ["Food safety", "Ordering", "Equipment", "Cleaning", "Payroll & admin", "Events", "Other"];
 const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
-const POSITIONS = ["Joy Creator", "Joy Creator/Shift Lead", "Froster", "Froster/Shift Lead", "Baker", "Utility", "Shift Lead", "Key Holder", "Manager", "Owner"];
+const POSITIONS = ["Joy Creator", "Froster", "Baker", "Utility", "Shift Lead", "Key Holder", "Offsite Event", "Manager", "Owner"];
+function splitPos(s) { return String(s || "").split(/\s*[,\/]\s*/).map(x => x.trim()).filter(Boolean); }
+function posOptions(cur) { const extra = splitPos(cur).filter(x => !POSITIONS.includes(x)); return [...POSITIONS, ...extra]; }
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
 const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], sales: [], hourly: [], items: [], synclog: [] };
@@ -151,6 +153,7 @@ function fieldHtml(f) {
   let input;
   if (f.type === "select") input = `<select id="${id}" name="${f.id}">${f.options.map(o => { const [v, l] = Array.isArray(o) ? o : [o, o]; return `<option value="${esc(v)}" ${String(f.value ?? "") === String(v) ? "selected" : ""}>${esc(l)}</option>`; }).join("")}</select>`;
   else if (f.type === "textarea") input = `<textarea id="${id}" name="${f.id}" ${req}>${esc(f.value)}</textarea>`;
+  else if (f.type === "checks") return `<fieldset style="border:0;padding:0;margin:0;min-width:0"><legend class="small" style="font-weight:600;color:var(--muted);margin-bottom:6px">${esc(f.label)}</legend><div class="row" style="gap:8px 16px">${f.options.map((o, i) => `<label class="row small" for="${id}_${i}" style="gap:6px;font-weight:500"><input type="checkbox" class="check" id="${id}_${i}" name="${f.id}" value="${esc(o)}" ${(f.value || []).includes(o) ? "checked" : ""}> ${esc(o)}</label>`).join("")}</div></fieldset>`;
   else if (f.type === "checkbox") return `<label class="row small" style="gap:8px;font-weight:600" for="${id}"><input type="checkbox" class="check" id="${id}" name="${f.id}" ${f.value ? "checked" : ""}> ${esc(f.label)}</label>`;
   else input = `<input id="${id}" name="${f.id}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${req} ${f.ph ? `placeholder="${esc(f.ph)}"` : ""} ${f.type === "number" ? 'step="any" inputmode="decimal"' : ""} ${f.list ? `list="${f.list}"` : ""} ${f.disabled ? "disabled" : ""}>`;
   return `<label class="f" for="${id}">${esc(f.label)}${input}</label>`;
@@ -170,7 +173,7 @@ function openForm(o) {
     const bad = [...form.querySelectorAll("[required]")].find(el => !el.value.trim());
     if (bad) { bad.focus(); $("dlgErr").textContent = "Fill in the required fields."; return; }
     const v = {};
-    o.fields.flat().forEach(f => { const el = form.elements[f.id]; if (!el || f.disabled) return; let val = f.type === "checkbox" ? el.checked : el.value; if (f.type === "number") val = num(val); else if (typeof val === "string") val = val.trim(); v[f.id] = val; });
+    o.fields.flat().forEach(f => { if (f.type === "checks") { v[f.id] = [...form.querySelectorAll(`input[name="${f.id}"]:checked`)].map(x => x.value).join(", "); return; } const el = form.elements[f.id]; if (!el || f.disabled) return; let val = f.type === "checkbox" ? el.checked : el.value; if (f.type === "number") val = num(val); else if (typeof val === "string") val = val.trim(); v[f.id] = val; });
     $("dlgOk").disabled = true;
     const ok = await o.onSubmit(v);
     if (ok === false || (ok && ok.error)) { $("dlgOk").disabled = false; if (ok && ok.error) $("dlgErr").textContent = ok.error; return; }
@@ -712,7 +715,8 @@ function personForm(p) {
   openForm({
     title: "Edit " + (p.name || "team member"), fields: [
       { id: "name", label: "Name", value: p.name, required: true },
-      [{ id: "position", label: "Position", type: "select", value: p.position || "Joy Creator", options: p.position && !POSITIONS.includes(p.position) ? [...POSITIONS, p.position] : POSITIONS }, { id: "phone", label: "Phone (optional)", type: "tel", value: p.phone }],
+      { id: "position", label: "Positions (check all that apply)", type: "checks", value: splitPos(p.position), options: posOptions(p.position) },
+      { id: "phone", label: "Phone (optional)", type: "tel", value: p.phone },
       { id: "role", label: "Access", type: "select", value: p.role, options: p.role === "owner" && !OWNER ? [["owner", "Owner"]] : roleOpts, disabled: !canRole || p.id === me.id && p.role === "owner" },
       { id: "active", label: "Active (uncheck when someone leaves; they can no longer see manager info)", type: "checkbox", value: p.active }],
     onSubmit: v => write("profiles", "update", v, p.id)
@@ -732,7 +736,8 @@ function inviteForm() {
   openForm({
     title: "Invite a team member", submit: "Send invite", done: "Invite sent",
     fields: [{ id: "name", label: "Name", required: true }, { id: "email", label: "Email", type: "email", required: true, ph: "They'll get a link to set a password" },
-      [{ id: "position", label: "Position", type: "select", value: "Joy Creator", options: POSITIONS }, { id: "role", label: "Access", type: "select", value: "staff", options: OWNER ? [["staff", "Staff"], ["manager", "Manager"]] : [["staff", "Staff"]] }]],
+      { id: "position", label: "Positions (check all that apply)", type: "checks", value: ["Joy Creator"], options: POSITIONS },
+      { id: "role", label: "Access", type: "select", value: "staff", options: OWNER ? [["staff", "Staff"], ["manager", "Manager"]] : [["staff", "Staff"]] }],
     onSubmit: async v => {
       const { data, error } = await sb.functions.invoke("invite-user", { body: { ...v, redirectTo: location.origin + location.pathname } });
       if (error) { let msg = error.message; try { const j = await error.context.json(); msg = j.error || msg; } catch (e) { } return { error: msg }; }
