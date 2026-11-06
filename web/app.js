@@ -7,7 +7,7 @@ const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY);
 
 const REM_CATS = ["Food safety", "Ordering", "Equipment", "Cleaning", "Payroll & admin", "Events", "Other"];
 const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
-const POSITIONS = ["Joy Creator", "Froster", "Baker", "Utility", "Shift Lead", "Key Holder", "Manager", "Owner"];
+const POSITIONS = ["Joy Creator", "Joy Creator/Shift Lead", "Froster", "Froster/Shift Lead", "Baker", "Utility", "Shift Lead", "Key Holder", "Manager", "Owner"];
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
 const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], sales: [], hourly: [], items: [], synclog: [] };
