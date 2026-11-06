@@ -146,3 +146,34 @@ body.ro .check[data-act]{pointer-events:none;opacity:.6}
 .bubble.mine{align-self:flex-end;background:var(--accent);color:var(--accent-ink)}
 .bubble small{display:block;font-size:11px;opacity:.75;margin-top:2px}
 @media (max-width:720px){.dm{grid-template-columns:1fr}}
+
+
+/* ---- Festive theme (matches the 3rd Birthday flyer) ---- */
+:root{--festive:#8fa9e6;--festive-2:#7b97de;--on-festive:#ffffff;--confetti:url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20width%3D%22360%22%20height%3D%22140%22%3E%3Ccircle%20cx%3D%22237%22%20cy%3D%22125%22%20r%3D%222.5%22%20fill%3D%22%238e5bc4%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%22103%22%20cy%3D%2253%22%20r%3D%223%22%20fill%3D%22%23f7b8c8%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%22320%22%20cy%3D%2253%22%20r%3D%222%22%20fill%3D%22%23f7b8c8%22%20opacity%3D%220.55%22/%3E%3Ccircle%20cx%3D%2278%22%20cy%3D%2229%22%20r%3D%223%22%20fill%3D%22%23ffffff%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%2227%22%20cy%3D%22107%22%20r%3D%222.5%22%20fill%3D%22%23ffffff%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%22321%22%20cy%3D%2246%22%20r%3D%223%22%20fill%3D%22%23e8484a%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%2238%22%20cy%3D%2221%22%20r%3D%222%22%20fill%3D%22%23f5c242%22%20opacity%3D%220.45%22/%3E%3Ccircle%20cx%3D%22313%22%20cy%3D%2213%22%20r%3D%222.5%22%20fill%3D%22%23b9dca0%22%20opacity%3D%220.55%22/%3E%3Ccircle%20cx%3D%22308%22%20cy%3D%2256%22%20r%3D%223%22%20fill%3D%22%23f5c242%22%20opacity%3D%220.65%22/%3E%3Ccircle%20cx%3D%22156%22%20cy%3D%22133%22%20r%3D%222%22%20fill%3D%22%23ffffff%22%20opacity%3D%220.45%22/%3E%3Ccircle%20cx%3D%22240%22%20cy%3D%2277%22%20r%3D%222.5%22%20fill%3D%22%238e5bc4%22%20opacity%3D%220.45%22/%3E%3Ccircle%20cx%3D%22136%22%20cy%3D%2286%22%20r%3D%222%22%20fill%3D%22%238e5bc4%22%20opacity%3D%220.55%22/%3E%3Ccircle%20cx%3D%2221%22%20cy%3D%2223%22%20r%3D%223%22%20fill%3D%22%23e8484a%22%20opacity%3D%220.55%22/%3E%3Ccircle%20cx%3D%2261%22%20cy%3D%2280%22%20r%3D%222.5%22%20fill%3D%22%23e8484a%22%20opacity%3D%220.45%22/%3E%3C/svg%3E");--script:"Dancing Script","Brush Script MT",cursive}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--festive:#34447a;--festive-2:#2b3968}}
+:root[data-theme="dark"]{--festive:#34447a;--festive-2:#2b3968}
+header.top{background:var(--festive) var(--confetti);background-repeat:repeat;border-bottom:0;color:var(--on-festive)}
+body::before{background:var(--festive)}
+.brand h1{font-family:var(--script);font-weight:700;font-size:32px;line-height:1.05;color:var(--on-festive);letter-spacing:0}
+.brand small{color:var(--on-festive);opacity:.85}
+.brand .mark{background:var(--on-festive);width:34px;height:34px}
+.brand .mark svg{stroke:var(--festive-2)}
+.top .tabs a{color:var(--on-festive);opacity:.82}
+.top .tabs a:hover{opacity:1}
+.top .tabs a[aria-current="page"]{opacity:1;border-bottom-color:var(--on-festive)}
+.top .badge{background:#e8484a;color:#fff}
+.top button{background:rgba(255,255,255,.16);color:var(--on-festive);border-color:rgba(255,255,255,.55);border-radius:999px}
+.top button:hover{background:rgba(255,255,255,.28);border-color:#fff}
+.top a:focus-visible,.top button:focus-visible{outline-color:#fff}
+.head h2{font-family:var(--script);font-weight:700;font-size:34px;line-height:1.1;letter-spacing:0;color:var(--accent)}
+button,.btn{border-radius:999px;padding-left:16px;padding-right:16px}
+button.sm{padding-left:12px;padding-right:12px}
+button.ghost{padding-left:8px;padding-right:8px}
+.day{border-radius:0} .shift{border-radius:6px} .add{border-radius:6px} .link{border-radius:0;padding:0}
+.card{border-radius:14px}
+.sub button[aria-pressed="true"]{background:var(--festive-2);border-color:var(--festive-2);color:#fff}
+.auth{background:var(--festive) var(--confetti)}
+.auth .card{box-shadow:0 10px 30px rgba(30,40,90,.18)}
+.auth .brand h1{color:var(--accent);font-size:36px}
+.auth .brand small{color:var(--muted)}
+.auth .brand .mark{background:var(--festive)}
