@@ -177,3 +177,7 @@ button.ghost{padding-left:8px;padding-right:8px}
 .auth .brand h1{color:var(--accent);font-size:36px}
 .auth .brand small{color:var(--muted)}
 .auth .brand .mark{background:var(--festive)}
+
+/* linked calendar events */
+.pill.ev{background:var(--surface-2);color:var(--ink);display:flex;align-items:center;gap:4px}
+.pill.ev i{width:6px;height:6px;border-radius:50%;flex:none;display:inline-block}
