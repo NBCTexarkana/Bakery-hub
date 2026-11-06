@@ -940,7 +940,7 @@ async function renderPdfInto(el, pdf) {
 }
 /* NBU-READER-END */
 
-const DOC_KINDS = { nbu: "NBU", srg: "Seasonal Readiness Guide", other: "Document" };
+const DOC_KINDS = { nbu: "NBU", srg: "Seasonal Readiness Guide", srp: "Seasonal Readiness Planner", other: "Document" };
 let docOpen = "", docQ = "", docPending = null;
 const docCache = {};
 function shortD(s) { return s ? fmtDate(s, { month: "numeric", day: "numeric" }) : ""; }
@@ -991,9 +991,9 @@ function vDocs() {
   if (d) return vDoc(d);
   docOpen = "";
   const q = docQ.trim(), ql = q.toLowerCase();
-  const head = `<div class="head"><h2>NBU &amp; Guides</h2>${MGR ? `<button class="primary" data-act="docNew">Add NBU or guide</button>` : ""}</div>
-    <label class="f" for="docQ" style="max-width:520px">Search every NBU and guide<input id="docQ" type="search" placeholder="e.g. holiday hours, CTO, signage" value="${esc(docQ)}"></label>`;
-  if (!S.docs.length) return head + `<div class="empty">${MGR ? "No NBUs yet. Tap “Add NBU or guide” and choose the PDF." : "No NBUs posted yet."}</div>`;
+  const head = `<div class="head"><h2>NBU &amp; Guides</h2>${MGR ? `<button class="primary" data-act="docNew">Add NBU, SRG or SRP</button>` : ""}</div>
+    <label class="f" for="docQ" style="max-width:520px">Search every NBU and guide<input id="docQ" type="search" placeholder="e.g. holiday hours, CTO, signage, recipe" value="${esc(docQ)}"></label>`;
+  if (!S.docs.length) return head + `<div class="empty">${MGR ? "No NBUs yet. Tap “Add NBU, SRG or SRP” and choose the PDF." : "No NBUs posted yet."}</div>`;
   if (q) {
     const links = S.docs.flatMap(x => (x.links || []).filter(l => (l.label + " " + l.ctx).toLowerCase().includes(ql)).map(l => [l, x])).slice(0, 30);
     const hits = S.docs.filter(x => (x.title + "\n" + (x.body || "")).toLowerCase().includes(ql));
@@ -1005,7 +1005,7 @@ function vDocs() {
   const row = x => `<div class="item"><div class="grow"><button class="link t" data-act="docOpen" data-id="${x.id}">${esc(x.title)}</button>
     <div class="row small muted" style="gap:6px;margin-top:2px">${x.week_start ? `<span>${esc(docRange(x))}</span>` : ""}${cur && cur.id === x.id ? `<span class="chip acc">${x.week_start <= t ? "This week" : "Next up"}</span>` : ""}<span>${(x.links || []).length} links</span><span>${(x.key_dates || []).length} key dates</span></div></div></div>`;
   const group = (k, label) => { const L = S.docs.filter(x => x.kind === k); return L.length ? `<section class="card"><h3>${label}</h3><div class="list">${L.map(row).join("")}</div></section>` : ""; };
-  return head + `<div class="grid">${group("nbu", "Nothing Bundt Updates (NBU)")}${group("srg", "Seasonal Readiness Guides")}${group("other", "Other documents")}</div>`;
+  return head + `<div class="grid">${group("nbu", "Nothing Bundt Updates (NBU)")}${group("srg", "Seasonal Readiness Guides (SRG)")}${group("srp", "Seasonal Readiness Planners (SRP)")}${group("other", "Other documents")}</div>`;
 }
 function vDoc(d) {
   const kd = (d.key_dates || []).slice().sort((a, b) => a.start.localeCompare(b.start));
@@ -1016,7 +1016,7 @@ function vDoc(d) {
     <section class="card"><h3>Key dates</h3>${kd.length ? `<div class="list">${kd.map(keyDateRow).join("")}</div>` : `<div class="empty">No key dates found.</div>`}</section>
     <section class="card"><h3>Links${(d.links || []).length ? ` (${d.links.length})` : ""}</h3>${(d.links || []).length ? `<div class="list">${d.links.map(l => docLinkRow(l)).join("")}</div>` : `<div class="empty">No links in this one.</div>`}</section>
   </div>
-  <section class="card" style="margin-top:16px"><h3>Full ${esc(d.kind === "nbu" ? "NBU" : "document")}</h3><p class="small muted" style="margin-top:-4px">Tap any link on the pages to open it.</p><div id="pdfView" class="pdfview"><div class="empty">Loading pages…</div></div></section>`;
+  <section class="card" style="margin-top:16px"><h3>Full ${esc(d.kind === "nbu" ? "NBU" : d.kind === "srg" ? "SRG" : d.kind === "srp" ? "SRP" : "document")}</h3><p class="small muted" style="margin-top:-4px">Tap any link on the pages to open it.</p><div id="pdfView" class="pdfview"><div class="empty">Loading pages…</div></div></section>`;
 }
 async function pdfFor(d) {
   if (docCache[d.id] && docCache[d.id].pdf) return docCache[d.id].pdf;
@@ -1037,8 +1037,8 @@ function attachViewer() {
 }
 function docUpload() {
   docPending = null;
-  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="docDlg" novalidate><h3>Add an NBU or guide</h3>
-    <label class="f" for="docKind">What is it?<select id="docKind"><option value="nbu">NBU (weekly update)</option><option value="srg">Seasonal Readiness Guide</option><option value="other">Other document</option></select></label>
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="docDlg" novalidate><h3>Add an NBU, SRG or SRP</h3>
+    <label class="f" for="docKind">What is it?<select id="docKind"><option value="nbu">NBU (weekly update)</option><option value="srg">Seasonal Readiness Guide (SRG)</option><option value="srp">Seasonal Readiness Planner (SRP)</option><option value="other">Other document</option></select></label>
     <label class="f" for="docFile">PDF file<input id="docFile" type="file" accept="application/pdf,.pdf"></label>
     <p class="small muted" style="margin:-4px 0 0">Use the PDF from the email, not a screenshot, so the links still work.</p>
     <div id="docReview"></div><div class="err" id="docErr"></div>
