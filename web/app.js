@@ -10,7 +10,7 @@ const INV_CATS = ["Ingredients", "Packaging", "Retail", "Supplies", "Other"];
 const POSITIONS = ["Joy Creator", "Joy Creator/Shift Lead", "Froster", "Froster/Shift Lead", "Baker", "Utility", "Shift Lead", "Key Holder", "Manager", "Owner"];
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
-const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], sales: [], hourly: [], items: [], synclog: [] };
+const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], sales: [], hourly: [], items: [], synclog: [] };
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
@@ -57,11 +57,12 @@ const LOADERS = {
   inventory: () => sb.from("inventory_items").select("*"),
   orders: () => sb.from("vendor_orders").select("*").order("updated_at", { ascending: false }).limit(200),
   vendors: () => sb.from("vendors").select("*").order("name"),
+  tshifts: () => sb.from("toast_shifts").select("*").gte("start_at", new Date(Date.now() - 21 * 864e5).toISOString()).order("start_at").limit(3000),
   shifts: () => sb.from("shifts").select("*").gte("date", ymd(addDays(new Date(), -120))).lte("date", ymd(addDays(new Date(), 180))),
   sales: () => sb.from("sales_daily").select("*").order("business_date", { ascending: false }).limit(400),
   synclog: () => sb.from("sync_log").select("*").order("ran_at", { ascending: false }).limit(5),
 };
-const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", sales_daily: "sales" };
+const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", sales_daily: "sales" };
 async function load(key) {
   if ((key === "sales" || key === "synclog") && !MGR) return;
   const data = await q(LOADERS[key](), "load " + key);
@@ -187,8 +188,14 @@ function closeModal() { $("modal").innerHTML = ""; }
 function vToday() {
   const t = today(), todays = remsOn(t), od = overdue();
   const week = []; for (let i = 1; i <= 7; i++) { const ds = ymd(addDays(new Date(), i)); remsOn(ds).filter(r => r.priority === "critical").forEach(r => week.push([r, ds])); }
-  const shifts = S.shifts.filter(s => s.date === t).sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
-  const myNext = S.shifts.filter(s => s.staff_id === me.id && s.date >= t).sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time)).slice(0, 4);
+  const TS = useToastSched();
+  const shifts = TS
+    ? S.tshifts.filter(s => tDay(s) === t).sort((a, b) => a.start_at.localeCompare(b.start_at)).map(s => ({ who: s.employee_name, start: tTime(s.start_at), end: tTime(s.end_at), note: s.job_title }))
+    : S.shifts.filter(s => s.date === t).sort((a, b) => (a.start_time || "").localeCompare(b.start_time || "")).map(s => ({ who: nameOf(s.staff_id), start: fmtTime(s.start_time), end: fmtTime(s.end_time), note: s.note }));
+  const nowIso = new Date().toISOString();
+  const myNext = TS
+    ? myToast().filter(s => (s.end_at || s.start_at) >= nowIso).sort((a, b) => a.start_at.localeCompare(b.start_at)).slice(0, 4).map(s => ({ date: tDay(s), start: tTime(s.start_at), end: tTime(s.end_at), note: s.job_title }))
+    : S.shifts.filter(s => s.staff_id === me.id && s.date >= t).sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time)).slice(0, 4).map(s => ({ date: s.date, start: fmtTime(s.start_time), end: fmtTime(s.end_time), note: s.note }));
   const low = S.inventory.filter(i => isLow(i)).sort(byName);
   const pins = S.messages.filter(m => m.pinned && (m.channel === "team" || MGR));
   const unread = S.dms.filter(d => d.recipient === me.id && !d.read_at).length;
@@ -205,10 +212,10 @@ function vToday() {
       ${week.length ? `<div class="list">${week.map(([r, ds]) => remRow(r, ds, true)).join("")}</div>` : `<div class="empty">No critical reminders in the next 7 days.</div>`}
     </section>
     <section class="card"><h3>Working today</h3>
-      ${shifts.length ? `<div class="list">${shifts.map(s => `<div class="item"><span class="av">${esc(initials(nameOf(s.staff_id)))}</span><div class="grow"><div class="t">${esc(nameOf(s.staff_id))}</div><div class="small muted">${fmtTime(s.start_time)}–${fmtTime(s.end_time)}${s.note ? " · " + esc(s.note) : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">No shifts scheduled today.</div>`}
+      ${shifts.length ? `<div class="list">${shifts.map(s => `<div class="item"><span class="av">${esc(initials(s.who))}</span><div class="grow"><div class="t">${esc(s.who)}</div><div class="small muted">${s.start}–${s.end}${s.note ? " · " + esc(s.note) : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">No shifts scheduled today.</div>`}
     </section>
     <section class="card"><h3>My next shifts</h3>
-      ${myNext.length ? `<div class="list">${myNext.map(s => `<div class="item"><div class="grow"><div class="t">${esc(fmtDate(s.date))}</div><div class="small muted">${fmtTime(s.start_time)}–${fmtTime(s.end_time)}${s.note ? " · " + esc(s.note) : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">You're not on the schedule yet.</div>`}
+      ${myNext.length ? `<div class="list">${myNext.map(s => `<div class="item"><div class="grow"><div class="t">${esc(fmtDate(s.date))}</div><div class="small muted">${s.start}–${s.end}${s.note ? " · " + esc(s.note) : ""}</div></div></div>`).join("")}</div>` : `<div class="empty">${TS ? "No upcoming Toast shifts matched to your email. Your Hub email needs to match your email in Toast." : "You're not on the schedule yet."}</div>`}
     </section>
     ${MGR ? `<section class="card"><h3>Stock to reorder</h3>
       ${low.length ? `<div class="list">${low.slice(0, 6).map(i => `<div class="item"><div class="grow"><span class="t">${esc(i.name)}</span> <span class="small muted">${esc(i.vendor || "")}</span></div><span class="chip ${num(i.on_hand) <= 0 ? "crit" : "warn"}">${fmtNum(i.on_hand)} / ${fmtNum(i.par)} ${esc(i.unit || "")}</span></div>`).join("")}</div><a class="btn" href="#orders" style="display:inline-block;margin-top:8px;text-decoration:none">Start an order</a>` : `<div class="empty">Everything is above par.</div>`}
@@ -614,7 +621,38 @@ function receiveForm(o) {
 }
 
 /* ----- schedule ----- */
+/* Toast Scheduling: when shifts have come over from Toast, the Hub shows those (read-only) */
+function useToastSched() { return S.tshifts.length > 0; }
+function tDay(s) { return ymd(new Date(s.start_at)); }
+function tTime(iso) { if (!iso) return "?"; const d = new Date(iso); let h = d.getHours(); const m = d.getMinutes(), ap = h >= 12 ? "p" : "a"; h = h % 12 || 12; return h + (m ? ":" + pad(m) : "") + ap; }
+function tHours(s) { return s.end_at ? Math.max(0, (new Date(s.end_at) - new Date(s.start_at)) / 36e5) : 0; }
+function myToast() { const em = (me.email || "").toLowerCase(); return em ? S.tshifts.filter(s => (s.employee_email || "") === em) : []; }
+function vToastSchedule() {
+  const days = [...Array(7)].map((_, i) => addDays(weekStart, i)), dss = days.map(ymd), t = today();
+  const wk = S.tshifts.filter(s => dss.includes(tDay(s)));
+  const names = [...new Set(wk.map(s => s.employee_name || "Unassigned"))].sort();
+  const myEm = (me.email || "").toLowerCase();
+  let total = 0;
+  const rows = names.map(n => {
+    let tot = 0; const isMe = wk.some(s => s.employee_name === n && myEm && s.employee_email === myEm);
+    const cells = dss.map(ds => {
+      const ss = wk.filter(s => (s.employee_name || "Unassigned") === n && tDay(s) === ds).sort((a, b) => a.start_at.localeCompare(b.start_at));
+      ss.forEach(s => tot += tHours(s));
+      return `<td>${ss.map(s => `<div class="shift">${tTime(s.start_at)}–${tTime(s.end_at)}${s.job_title ? `<br><span style="font-weight:500">${esc(s.job_title)}</span>` : ""}</div>`).join("")}</td>`;
+    }).join("");
+    total += tot;
+    return `<tr${isMe ? ' style="background:var(--accent-soft)"' : ""}><td><b>${esc(n)}</b></td>${cells}<td><b>${fmtNum(Math.round(tot * 10) / 10)}</b></td></tr>`;
+  }).join("");
+  const range = `${days[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${days[6].toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  const newest = S.tshifts.reduce((a, s) => s.updated_at > a ? s.updated_at : a, "");
+  return `<div class="head"><h2>Week of ${esc(range)}</h2>
+    <button data-act="wkPrev" aria-label="Previous week">‹</button><button data-act="wkThis">This week</button><button data-act="wkNext" aria-label="Next week">›</button></div>
+  <p class="muted small" style="margin:-8px 0 14px">From Toast Scheduling${newest ? ", updated " + esc(ago(newest)) : ""}. Make changes in Toast; they show up here within about 15 minutes. ${fmtNum(Math.round(total * 10) / 10)} scheduled hours this week.</p>
+  ${names.length ? `<div class="card" style="padding:0"><div class="scroll"><table class="sched"><thead><tr><th>Team member</th>${days.map((d, i) => `<th style="${dss[i] === t ? "color:var(--accent)" : ""}">${d.toLocaleDateString(undefined, { weekday: "short" })} ${d.getDate()}</th>`).join("")}<th>Hrs</th></tr></thead><tbody>${rows}</tbody></table></div></div>`
+  : `<div class="empty">No shifts in Toast for this week. The Hub keeps about 3 weeks ahead and 3 weeks back.</div>`}`;
+}
 function vSchedule() {
+  if (useToastSched()) return vToastSchedule();
   const days = [...Array(7)].map((_, i) => addDays(weekStart, i)), dss = days.map(ymd), t = today();
   const staff = S.profiles.filter(p => p.active).sort(byName);
   const wk = S.shifts.filter(s => dss.includes(s.date));
@@ -882,7 +920,7 @@ async function startAppInner() {
   if (!me.active) { await sb.auth.signOut(); showAuth("login", "Your account has been turned off. Talk to a manager."); return; }
   $("authView").hidden = true; $("appView").hidden = false;
   $("main").innerHTML = `<div class="empty">Loading…</div>`;
-  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "sales", "synclog"].map(load));
+  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "sales", "synclog"].map(load));
   if (!booted) {
     booted = true;
     channel = sb.channel("hub");
