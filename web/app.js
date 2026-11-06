@@ -127,15 +127,18 @@ function evRow(e) {
 }
 function remsOn(ds) { return S.reminders.filter(r => occurs(r, ds)).sort((a, b) => (b.priority === "critical") - (a.priority === "critical") || (a.time || "99").localeCompare(b.time || "99")); }
 function isDone(r, ds) { return (r.done_dates || []).includes(ds); }
-function overdue() { const t = today(); return S.reminders.filter(r => r.repeat === "none" && r.date < t && !isDone(r, r.date)); }
+function isEvent(r) { return r.kind === "event"; }
+function overdue() { const t = today(); return S.reminders.filter(r => !isEvent(r) && r.repeat === "none" && r.date < t && !isDone(r, r.date)); }
 const REPEAT_LABEL = { none: "", daily: "Daily", weekly: "Weekly", monthly: "Monthly", yearly: "Yearly" };
 function remRow(r, ds, showDate) {
-  const d = isDone(r, ds);
+  const ev = isEvent(r), d = !ev && isDone(r, ds);
   return `<div class="item ${d ? "done" : ""}">
-    <input type="checkbox" class="check" data-act="remDone" data-id="${r.id}" data-date="${ds}" ${d ? "checked" : ""} ${MGR ? "" : "disabled"} aria-label="Mark ${esc(r.title)} done">
+    ${ev ? `<span class="check" aria-hidden="true" style="display:inline-grid;place-items:center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"><rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg></span>`
+      : `<input type="checkbox" class="check" data-act="remDone" data-id="${r.id}" data-date="${ds}" ${d ? "checked" : ""} ${MGR ? "" : "disabled"} aria-label="Mark ${esc(r.title)} done">`}
     <div class="grow">${MGR ? `<button class="link t" data-act="remEdit" data-id="${r.id}">${esc(r.title)}</button>` : `<span class="t">${esc(r.title)}</span>`}
       <div class="row small muted" style="gap:6px;margin-top:2px">
         ${r.priority === "critical" ? '<span class="chip crit">Critical</span>' : ""}
+        ${ev ? '<span class="chip acc">Event</span>' : ""}
         ${showDate ? `<span>${esc(fmtDate(ds))}</span>` : ""}
         ${r.time ? `<span>${fmtTime(r.time)}</span>` : ""}
         ${r.category ? `<span class="chip">${esc(r.category)}</span>` : ""}
@@ -147,11 +150,12 @@ function remRow(r, ds, showDate) {
 function remForm(r, date) {
   r = r || {};
   openForm({
-    title: r.id ? "Edit reminder" : "New reminder", submit: r.id ? "Save" : "Add reminder", fields: [
-      { id: "title", label: "What needs to happen", value: r.title, required: true, ph: "e.g. Health permit renewal due" },
+    title: r.id ? "Edit calendar item" : "Add to calendar", submit: r.id ? "Save" : "Add to calendar", fields: [
+      { id: "kind", label: "Type", type: "select", value: r.kind || "reminder", options: [["reminder", "Reminder (check it off when done)"], ["event", "Event (meeting, delivery, pickup, catering…)"]] },
+      { id: "title", label: "What is it?", value: r.title, required: true, ph: "e.g. Health permit renewal due, or Catering pickup for First Baptist" },
       [{ id: "date", label: "Date", type: "date", value: r.date || date || today(), required: true }, { id: "time", label: "Time (optional)", type: "time", value: hm(r.time) }],
       [{ id: "repeat", label: "Repeats", type: "select", value: r.repeat || "none", options: [["none", "Does not repeat"], ["daily", "Every day"], ["weekly", "Every week"], ["monthly", "Every month"], ["yearly", "Every year"]] },
-       { id: "priority", label: "Priority", type: "select", value: r.priority || "critical", options: [["critical", "Critical"], ["normal", "Normal"]] }],
+       { id: "priority", label: "Priority", type: "select", value: r.priority || (r.kind === "event" ? "normal" : "critical"), options: [["critical", "Critical"], ["normal", "Normal"]] }],
       { id: "category", label: "Category", type: "select", value: r.category || "Other", options: REM_CATS },
       { id: "notes", label: "Notes", type: "textarea", value: r.notes }
     ],
@@ -218,11 +222,11 @@ function vToday() {
   const pins = S.messages.filter(m => m.pinned && (m.channel === "team" || MGR));
   const unread = S.dms.filter(d => d.recipient === me.id && !d.read_at).length;
   const sd = MGR ? S.sales.find(s => s.business_date === t) : null;
-  return `<div class="head"><h2>${esc(new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))}</h2>${MGR ? `<button class="primary" data-act="remNew" data-date="${t}">Add reminder</button>` : ""}</div>
+  return `<div class="head"><h2>${esc(new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }))}</h2>${MGR ? `<button class="primary" data-act="remNew" data-date="${t}">Add to calendar</button>` : ""}</div>
   ${unread ? `<div class="banner">You have ${unread} unread private message${unread > 1 ? "s" : ""}. <a href="#messages" data-act="openPrivate" style="color:inherit">Open messages</a></div>` : ""}
   ${MGR && sd ? `<div class="kpis">${kpi("Net sales so far", money(sd.net_sales))}${kpi("Labor %", sd.net_sales > 0 ? pct(sd.labor_cost / sd.net_sales * 100) : "–", laborClass(sd))}${kpi("Orders", sd.order_count)}</div>` : ""}
   <div class="grid">
-    <section class="card"><h3>Today's reminders</h3>
+    <section class="card"><h3>Today's calendar</h3>
       ${od.length ? `<div class="small" style="color:var(--crit);font-weight:700;margin-bottom:4px">Overdue</div><div class="list" style="margin-bottom:10px">${od.map(r => remRow(r, r.date, true)).join("")}</div>` : ""}
       ${todays.length ? `<div class="list">${todays.map(r => remRow(r, t)).join("")}</div>` : `<div class="empty">Nothing due today.</div>`}
       ${calOn(t).length ? `<div class="small" style="font-weight:700;margin:12px 0 2px">On your calendars</div><div class="list">${calOn(t).map(evRow).join("")}</div>` : ""}
@@ -312,11 +316,11 @@ function vCalendar() {
   const sel = remsOn(calSel), selEv = calOn(calSel);
   return `<div class="head"><h2>${m.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</h2>
     <button data-act="calPrev" aria-label="Previous month">‹</button><button data-act="calToday">Today</button><button data-act="calNext" aria-label="Next month">›</button>
-    ${MGR ? `<button class="primary" data-act="remNew" data-date="${calSel}">Add reminder</button>` : ""}</div>
+    ${MGR ? `<button class="primary" data-act="remNew" data-date="${calSel}">Add to calendar</button>` : ""}</div>
   <div class="cal">
     <div class="card" style="padding:0;overflow:hidden"><div class="month">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(d => `<div class="dow">${d}</div>`).join("")}${cells}</div></div>
     <section class="card"><h3>${esc(fmtDate(calSel, { weekday: "long", month: "long", day: "numeric" }))}</h3>
-      ${sel.length ? `<div class="list">${sel.map(r => remRow(r, calSel)).join("")}</div>` : `<div class="empty">No reminders this day.</div>`}
+      ${sel.length ? `<div class="list">${sel.map(r => remRow(r, calSel)).join("")}</div>` : `<div class="empty">Nothing on the calendar this day.</div>`}
       ${selEv.length ? `<h3 style="margin-top:16px">On your calendars</h3><div class="list">${selEv.map(evRow).join("")}</div>` : ""}
     </section>
   </div>`;
@@ -791,7 +795,7 @@ function views() {
 }
 function renderTabs() {
   const t = today();
-  const crit = overdue().length + remsOn(t).filter(r => r.priority === "critical" && !isDone(r, t)).length;
+  const crit = overdue().length + remsOn(t).filter(r => !isEvent(r) && r.priority === "critical" && !isDone(r, t)).length;
   const low = S.inventory.filter(i => isLow(i)).length;
   const unread = S.dms.filter(d => d.recipient === me.id && !d.read_at).length;
   const badge = { today: crit, inventory: MGR ? low : 0, messages: unread };
