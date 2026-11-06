@@ -1123,7 +1123,7 @@ function nbuCard() {
 
 /* ---------------- render ---------------- */
 function views() {
-  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["nbu", "NBU"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
+  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["nbu", "NBU/SRG"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
 }
 function renderTabs() {
   const t = today();
