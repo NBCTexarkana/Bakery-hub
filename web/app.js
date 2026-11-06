@@ -1,6 +1,6 @@
+/* Texarkana Bakery Hub - web app (no build step). Talks to Supabase. */
 (function () {
-"/* Texarkana Bakery Hub - web app (no build step). Talks to Supabase. */
-use strict";
+"use strict";
 const CFG = window.BAKERY_CONFIG || {};
 const INITIAL_HASH = location.hash; // read before Supabase consumes invite/recovery tokens
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_KEY);
