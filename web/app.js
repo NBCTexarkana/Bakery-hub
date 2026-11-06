@@ -12,7 +12,7 @@ function splitPos(s) { return String(s || "").split(/\s*[,\/]\s*/).map(x => x.tr
 function posOptions(cur) { const extra = splitPos(cur).filter(x => !POSITIONS.includes(x)); return [...POSITIONS, ...extra]; }
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
-const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], sales: [], hourly: [], items: [], synclog: [] };
+const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], cal: [], sales: [], hourly: [], items: [], synclog: [] };
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
@@ -59,12 +59,13 @@ const LOADERS = {
   inventory: () => sb.from("inventory_items").select("*"),
   orders: () => sb.from("vendor_orders").select("*").order("updated_at", { ascending: false }).limit(200),
   vendors: () => sb.from("vendors").select("*").order("name"),
+  cal: () => sb.from("cal_events").select("*").gte("end_at", new Date(Date.now() - 45 * 864e5).toISOString()).order("start_at").limit(5000),
   tshifts: () => sb.from("toast_shifts").select("*").gte("start_at", new Date(Date.now() - 21 * 864e5).toISOString()).order("start_at").limit(3000),
   shifts: () => sb.from("shifts").select("*").gte("date", ymd(addDays(new Date(), -120))).lte("date", ymd(addDays(new Date(), 180))),
   sales: () => sb.from("sales_daily").select("*").order("business_date", { ascending: false }).limit(400),
   synclog: () => sb.from("sync_log").select("*").order("ran_at", { ascending: false }).limit(5),
 };
-const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", sales_daily: "sales" };
+const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", cal_events: "cal", sales_daily: "sales" };
 async function load(key) {
   if ((key === "sales" || key === "synclog") && !MGR) return;
   const data = await q(LOADERS[key](), "load " + key);
@@ -111,6 +112,18 @@ function occurs(r, ds) {
   if (!r.date || ds < r.date) return false;
   const a = parse(r.date), b = parse(ds);
   switch (r.repeat) { case "daily": return true; case "weekly": return a.getDay() === b.getDay(); case "monthly": return a.getDate() === b.getDate(); case "yearly": return a.getDate() === b.getDate() && a.getMonth() === b.getMonth(); default: return ds === r.date; }
+}
+/* linked calendars (Outlook etc.) */
+function evColor(e) { return /^#[0-9a-f]{6}$/i.test(e.color || "") ? e.color : "#2f6fd6"; }
+function calOn(ds) {
+  return S.cal.filter(e => e.all_day ? (e.start_date <= ds && ds < (e.end_date || e.start_date) || e.start_date === ds) : ymd(new Date(e.start_at)) === ds)
+    .sort((a, b) => (b.all_day - a.all_day) || a.start_at.localeCompare(b.start_at));
+}
+function evTime(e) { if (e.all_day) return "All day"; const f = d => { const x = new Date(d); let h = x.getHours(); const m = x.getMinutes(), ap = h >= 12 ? "p" : "a"; h = h % 12 || 12; return h + (m ? ":" + pad(m) : "") + ap; }; return f(e.start_at) + "–" + f(e.end_at); }
+function evRow(e) {
+  return `<div class="item"><span aria-hidden="true" style="width:10px;height:10px;border-radius:50%;margin-top:6px;flex:none;background:${evColor(e)}"></span><div class="grow">
+    <div class="t">${esc(e.title)}</div>
+    <div class="row small muted" style="gap:6px;margin-top:2px"><span>${esc(evTime(e))}</span>${e.location ? `<span>${esc(e.location)}</span>` : ""}<span class="chip">${esc(e.feed_name)}</span>${e.managers_only ? '<span class="chip acc">Managers</span>' : ""}</div></div></div>`;
 }
 function remsOn(ds) { return S.reminders.filter(r => occurs(r, ds)).sort((a, b) => (b.priority === "critical") - (a.priority === "critical") || (a.time || "99").localeCompare(b.time || "99")); }
 function isDone(r, ds) { return (r.done_dates || []).includes(ds); }
@@ -193,7 +206,7 @@ function vToday() {
   const week = []; for (let i = 1; i <= 7; i++) { const ds = ymd(addDays(new Date(), i)); remsOn(ds).filter(r => r.priority === "critical").forEach(r => week.push([r, ds])); }
   const TS = useToastSched();
   const shifts = TS
-    ? [...S.tshifts.filter(s => tDay(s) === t).map(s => ({ k: s.start_at, who: s.employee_name, start: tTime(s.start_at), end: tTime(s.end_at), note: s.job_title })),
+    ? [...S.tshifts.filter(s => tDay(s) === t).map(s => ({ k: s.start_at, who: hubName(s), start: tTime(s.start_at), end: tTime(s.end_at), note: s.job_title })),
        ...S.shifts.filter(s => s.date === t).map(s => ({ k: new Date(s.date + "T" + s.start_time).toISOString(), who: nameOf(s.staff_id), start: fmtTime(s.start_time), end: fmtTime(s.end_time), note: s.note }))].sort((a, b) => a.k.localeCompare(b.k))
     : S.shifts.filter(s => s.date === t).sort((a, b) => (a.start_time || "").localeCompare(b.start_time || "")).map(s => ({ who: nameOf(s.staff_id), start: fmtTime(s.start_time), end: fmtTime(s.end_time), note: s.note }));
   const nowIso = new Date().toISOString();
@@ -212,6 +225,7 @@ function vToday() {
     <section class="card"><h3>Today's reminders</h3>
       ${od.length ? `<div class="small" style="color:var(--crit);font-weight:700;margin-bottom:4px">Overdue</div><div class="list" style="margin-bottom:10px">${od.map(r => remRow(r, r.date, true)).join("")}</div>` : ""}
       ${todays.length ? `<div class="list">${todays.map(r => remRow(r, t)).join("")}</div>` : `<div class="empty">Nothing due today.</div>`}
+      ${calOn(t).length ? `<div class="small" style="font-weight:700;margin:12px 0 2px">On your calendars</div><div class="list">${calOn(t).map(evRow).join("")}</div>` : ""}
     </section>
     <section class="card"><h3>Critical this week</h3>
       ${week.length ? `<div class="list">${week.map(([r, ds]) => remRow(r, ds, true)).join("")}</div>` : `<div class="empty">No critical reminders in the next 7 days.</div>`}
@@ -287,14 +301,15 @@ function vCalendar() {
   let cells = "";
   for (let i = 0; i < 42; i++) {
     const d = addDays(start, i); if (i >= 35 && d.getMonth() !== m.getMonth()) break;
-    const ds = ymd(d), rs = remsOn(ds);
-    cells += `<button class="day ${d.getMonth() !== m.getMonth() ? "out" : ""} ${ds === t ? "today" : ""} ${ds === calSel ? "sel" : ""}" data-act="calPick" data-date="${ds}" aria-label="${esc(fmtDate(ds, { weekday: "long", month: "long", day: "numeric" }))}, ${rs.length} reminders">
+    const ds = ymd(d), rs = remsOn(ds), evs = calOn(ds);
+    cells += `<button class="day ${d.getMonth() !== m.getMonth() ? "out" : ""} ${ds === t ? "today" : ""} ${ds === calSel ? "sel" : ""}" data-act="calPick" data-date="${ds}" aria-label="${esc(fmtDate(ds, { weekday: "long", month: "long", day: "numeric" }))}, ${rs.length} reminders, ${evs.length} calendar events">
       <span class="n">${d.getDate()}</span>
       ${rs.slice(0, 3).map(r => `<span class="pill ${r.priority === "critical" ? "crit" : ""}">${esc(r.title)}</span>`).join("")}
-      ${rs.length > 3 ? `<span class="pill more">+${rs.length - 3} more</span>` : ""}
-      <span class="dots">${rs.slice(0, 5).map(r => `<i class="${r.priority === "critical" ? "crit" : ""}"></i>`).join("")}</span></button>`;
+      ${evs.slice(0, Math.max(0, 3 - rs.length)).map(e => `<span class="pill ev"><i style="background:${evColor(e)}"></i>${esc(e.title)}</span>`).join("")}
+      ${rs.length + evs.length > 3 ? `<span class="pill more">+${rs.length + evs.length - 3} more</span>` : ""}
+      <span class="dots">${rs.slice(0, 5).map(r => `<i class="${r.priority === "critical" ? "crit" : ""}"></i>`).join("")}${evs.slice(0, Math.max(0, 5 - rs.length)).map(e => `<i style="background:${evColor(e)}"></i>`).join("")}</span></button>`;
   }
-  const sel = remsOn(calSel);
+  const sel = remsOn(calSel), selEv = calOn(calSel);
   return `<div class="head"><h2>${m.toLocaleDateString(undefined, { month: "long", year: "numeric" })}</h2>
     <button data-act="calPrev" aria-label="Previous month">‹</button><button data-act="calToday">Today</button><button data-act="calNext" aria-label="Next month">›</button>
     ${MGR ? `<button class="primary" data-act="remNew" data-date="${calSel}">Add reminder</button>` : ""}</div>
@@ -302,6 +317,7 @@ function vCalendar() {
     <div class="card" style="padding:0;overflow:hidden"><div class="month">${["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map(d => `<div class="dow">${d}</div>`).join("")}${cells}</div></div>
     <section class="card"><h3>${esc(fmtDate(calSel, { weekday: "long", month: "long", day: "numeric" }))}</h3>
       ${sel.length ? `<div class="list">${sel.map(r => remRow(r, calSel)).join("")}</div>` : `<div class="empty">No reminders this day.</div>`}
+      ${selEv.length ? `<h3 style="margin-top:16px">On your calendars</h3><div class="list">${selEv.map(evRow).join("")}</div>` : ""}
     </section>
   </div>`;
 }
@@ -627,22 +643,35 @@ function receiveForm(o) {
 
 /* ----- schedule ----- */
 /* Toast Scheduling: when shifts have come over from Toast, the Hub shows those (read-only) */
+function norm(x) { return String(x || "").toLowerCase().replace(/[^a-z]/g, ""); }
+// Match a Toast shift to a Hub person: same email first, then same name, then a name that starts the same way ("Anna Cate" = "Anna Cate May")
+function toastPerson(s) {
+  const em = (s.employee_email || "").toLowerCase(), nm = norm(s.employee_name);
+  const ps = S.profiles.filter(p => p.active !== false);
+  return (em && ps.find(p => (p.email || "").toLowerCase() === em))
+    || ps.find(p => norm(p.name) === nm)
+    || ps.find(p => wordsMatch(p.name, s.employee_name))
+    || null;
+}
+// "Anna Cate" matches "Anna Cate May": every word of the shorter name matches the start of the longer one (at least 2 words)
+function wordsMatch(a, b) { const w = x => String(x || "").toLowerCase().split(/\s+/).map(y => y.replace(/[^a-z]/g, "")).filter(Boolean); const A = w(a), B = w(b), n = Math.min(A.length, B.length); return n >= 2 && A.slice(0, n).join(" ") === B.slice(0, n).join(" "); }
+function hubName(s) { const p = toastPerson(s); return p ? p.name : (s.employee_name || "Unassigned"); }
 function useToastSched() { return S.tshifts.length > 0; }
 function tDay(s) { return ymd(new Date(s.start_at)); }
 function tTime(iso) { if (!iso) return "?"; const d = new Date(iso); let h = d.getHours(); const m = d.getMinutes(), ap = h >= 12 ? "p" : "a"; h = h % 12 || 12; return h + (m ? ":" + pad(m) : "") + ap; }
 function tHours(s) { return s.end_at ? Math.max(0, (new Date(s.end_at) - new Date(s.start_at)) / 36e5) : 0; }
-function myToast() { const em = (me.email || "").toLowerCase(); return em ? S.tshifts.filter(s => (s.employee_email || "") === em) : []; }
+function myToast() { return S.tshifts.filter(s => { const p = toastPerson(s); return p && p.id === me.id; }); }
 function vToastSchedule() {
   const days = [...Array(7)].map((_, i) => addDays(weekStart, i)), dss = days.map(ymd), t = today();
   // Toast shifts plus shifts managers added in the Hub, in one list
-  const toastWk = S.tshifts.filter(s => dss.includes(tDay(s))).map(s => ({ name: s.employee_name || "Unassigned", day: tDay(s), sort: s.start_at, start: tTime(s.start_at), end: tTime(s.end_at), hrs: tHours(s), job: s.job_title, email: s.employee_email || "", hub: null }));
+  const toastWk = S.tshifts.filter(s => dss.includes(tDay(s))).map(s => ({ name: hubName(s), day: tDay(s), sort: s.start_at, start: tTime(s.start_at), end: tTime(s.end_at), hrs: tHours(s), job: s.job_title, email: s.employee_email || "", hub: null }));
   const hubWk = S.shifts.filter(s => dss.includes(s.date)).map(s => { const p = person(s.staff_id) || {}; return { name: p.name || "Someone", day: s.date, sort: s.date + "T" + s.start_time, start: fmtTime(s.start_time), end: fmtTime(s.end_time), hrs: hours(s.start_time, s.end_time), job: s.note, email: p.email || "", hub: s }; });
   const wk = [...toastWk, ...hubWk];
   const names = [...new Set(wk.map(s => s.name))].sort();
   const myEm = (me.email || "").toLowerCase();
   let total = 0;
   const rows = names.map(n => {
-    let tot = 0; const isMe = wk.some(s => s.name === n && myEm && s.email === myEm);
+    let tot = 0; const isMe = n === me.name;
     const cells = dss.map(ds => {
       const ss = wk.filter(s => s.name === n && s.day === ds).sort((a, b) => a.sort.localeCompare(b.sort));
       ss.forEach(s => tot += s.hrs);
@@ -934,7 +963,7 @@ async function startAppInner() {
   if (!me.active) { await sb.auth.signOut(); showAuth("login", "Your account has been turned off. Talk to a manager."); return; }
   $("authView").hidden = true; $("appView").hidden = false;
   $("main").innerHTML = `<div class="empty">Loading…</div>`;
-  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "sales", "synclog"].map(load));
+  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "cal", "sales", "synclog"].map(load));
   if (!booted) {
     booted = true;
     channel = sb.channel("hub");
