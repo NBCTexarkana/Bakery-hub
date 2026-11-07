@@ -1166,12 +1166,12 @@ function vRecipes() {
   if (r) return vRecipe(r);
   recOpen = "";
   const q = recQ.trim().toLowerCase();
-  const list = S.recipes.filter(x => (recCat === "all" || x.category === recCat) && (!q || [x.name, x.section, x.ingredients, x.steps, x.notes].join(" ").toLowerCase().includes(q)));
+  const list = S.recipes.filter(x => (recCat === "all" || x.category === recCat) && (!q || [x.name, x.section, x.ingredients, x.steps, x.notes, x.body].join(" ").toLowerCase().includes(q)));
   const tabs = [["all", "All"], ...REC_CATS];
-  const head = `<div class="head"><h2>Recipes</h2>${MGR ? `<button class="primary" data-act="recNew">Add recipe</button>` : ""}</div>
+  const head = `<div class="head"><h2>Recipes</h2>${MGR ? `<button data-act="recNew">Type a recipe</button><button class="primary" data-act="recBulk">Add recipe PDFs</button>` : ""}</div>
     <div class="sub" role="group" aria-label="Recipe types">${tabs.map(([k, l]) => `<button data-act="recCat" data-tab="${k}" aria-pressed="${recCat === k}">${l}${k !== "all" ? ` <span class="small">${S.recipes.filter(x => x.category === k).length}</span>` : ""}</button>`).join("")}</div>
     <label class="f" for="recQ" style="max-width:520px">Search recipes<input id="recQ" type="search" placeholder="e.g. cream cheese frosting, pumpkin, butter" value="${esc(recQ)}"></label>`;
-  if (!S.recipes.length) return head + `<div class="empty">${MGR ? "No recipes yet. Tap “Add recipe” to add your first one." : "No recipes posted yet."}</div>`;
+  if (!S.recipes.length) return head + `<div class="empty">${MGR ? "No recipes yet. Tap “Add recipe PDFs” to upload your recipes exactly as written." : "No recipes posted yet."}</div>`;
   if (!list.length) return head + `<div class="empty">No recipes match.</div>`;
   const cats = recCat === "all" ? REC_CATS : REC_CATS.filter(c => c[0] === recCat);
   return head + `<div class="grid">${cats.map(([k, l]) => {
@@ -1192,23 +1192,75 @@ function vRecipe(r) {
   <div class="head"><div style="margin-right:auto"><h2 style="margin:0">${esc(r.name)}</h2>
     <div class="row small muted" style="gap:6px;margin-top:4px"><span class="chip acc">${esc(REC_LABEL[r.category] || "Recipe")}</span>${r.section ? `<span>${esc(r.section)}</span>` : ""}${recDates(r) ? `<span>${esc(recDates(r))}</span>` : ""}${recStatus(r)}</div></div>
     ${r.file_path ? `<button data-act="recFile" data-id="${r.id}">Open PDF</button>` : ""}${MGR ? `<button data-act="recEdit" data-id="${r.id}">Edit</button>` : ""}</div>
-  <div class="grid">
-    <section class="card"><h3>Ingredients</h3>
+  ${r.file_path ? `<section class="card" style="margin-bottom:16px"><h3>Recipe</h3><div id="recPdf" class="pdfview" data-path="${esc(r.file_path)}"><div class="empty">Loading the recipe…</div></div></section>` : ""}
+  ${ing.length || steps.length || r.notes || r.photo_path || !r.file_path ? `<div class="grid">
+    ${ing.length || !r.file_path ? `<section class="card"><h3>${r.file_path ? "Batch calculator" : "Ingredients"}</h3>
       <div class="row small" style="gap:8px;margin-bottom:8px;align-items:center"><span class="muted">Batch size</span><div class="sub" role="group" aria-label="Batch size" style="margin:0">${mults.map(([k, l]) => `<button class="sm" data-act="recMult" data-k="${k}" aria-pressed="${recMult === k}">${l}</button>`).join("")}</div></div>
       ${r.yield ? `<div class="small muted" style="margin-bottom:6px">${recMult !== 1 ? `A 1× batch makes ${esc(r.yield)}. Showing a ${qtyFmt(recMult)}× batch.` : `Makes ${esc(r.yield)}`}</div>` : ""}
       ${ing.length ? `<ul class="ing">${ing.map(l => `<li>${scaleLine(l, recMult)}</li>`).join("")}</ul>` : `<div class="empty">No ingredients listed.</div>`}
       ${r.prep_time ? `<div class="small muted" style="margin-top:8px">Time: ${esc(r.prep_time)}</div>` : ""}
-    </section>
-    <section class="card"><h3>Steps</h3>${steps.length ? `<ol class="steps">${steps.map(s => `<li>${esc(s.replace(/^\d+[.)]\s*/, ""))}</li>`).join("")}</ol>` : `<div class="empty">No steps listed.</div>`}
-      ${r.notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(r.notes)}</div>` : ""}</section>
+    </section>` : ""}
+    ${steps.length || r.notes || !r.file_path ? `<section class="card"><h3>${steps.length || !r.file_path ? "Steps" : "Notes"}</h3>${steps.length ? `<ol class="steps">${steps.map(s => `<li>${esc(s.replace(/^\d+[.)]\s*/, ""))}</li>`).join("")}</ol>` : !r.file_path ? `<div class="empty">No steps listed.</div>` : ""}
+      ${r.notes ? `${steps.length || !r.file_path ? `<h3 style="margin-top:14px">Notes</h3>` : ""}<div style="white-space:pre-wrap">${esc(r.notes)}</div>` : ""}</section>` : ""}
     ${r.photo_path ? `<section class="card"><h3>Photo</h3><div id="recPhoto" data-path="${esc(r.photo_path)}"><div class="empty">Loading photo…</div></div></section>` : ""}
-  </div>`;
+  </div>` : ""}`;
 }
 async function recSigned(path) {
   const c = recUrls[path]; if (c && c.exp > Date.now()) return c.url;
   const { data, error } = await sb.storage.from("recipes").createSignedUrl(path, 3600);
   if (error || !data) throw error || new Error("no link");
   recUrls[path] = { url: data.signedUrl, exp: Date.now() + 50 * 60000 }; return data.signedUrl;
+}
+const recPdfCache = {};
+function attachRecPdf() {
+  const slot = $("recPdf"); if (!slot) return;
+  const path = slot.dataset.path, c = recPdfCache[path] = recPdfCache[path] || {};
+  if (c.el) { slot.replaceWith(c.el); return; }
+  c.el = slot;
+  (async () => {
+    if (!c.pdf) {
+      const { data, error } = await sb.storage.from("recipes").download(path); if (error) throw error;
+      const L = await pdfjs(); c.pdf = await L.getDocument({ data: new Uint8Array(await data.arrayBuffer()) }).promise;
+    }
+    await renderPdfInto(c.el, c.pdf);
+  })().catch(e => { console.error(e); c.el.innerHTML = `<div class="empty">Couldn't show the recipe here. Use “Open PDF” instead.</div>`; delete c.el; });
+}
+async function pdfText(file) {
+  try { const L = await pdfjs(); const pdf = await L.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise; const pages = await readPdf(pdf); return pages.map(p => p.cols.map(ls => ls.map(l => l.text).join("\n")).join("\n")).join("\n\n").slice(0, 100000); }
+  catch (e) { console.error(e); return ""; }
+}
+function recNameFromFile(n) { return n.replace(/\.pdf$/i, "").replace(/[_]+/g, " ").replace(/\s+/g, " ").trim(); }
+function recBulk() {
+  const sections = [...new Set(S.recipes.map(x => x.section).filter(Boolean))].sort();
+  $("modal").innerHTML = `<div class="scrim" data-act="closeScrim"><form class="dialog" id="rbDlg" novalidate><h3>Add recipe PDFs</h3>
+    <p class="small muted" style="margin:0">Pick one or more PDFs. Each one becomes its own recipe, named after the file. You can rename any of them after.</p>
+    <div class="two"><label class="f" for="rbCat">Type<select id="rbCat">${REC_CATS.map(([k, l]) => `<option value="${k}" ${k === (recCat === "all" ? "standard" : recCat) ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label class="f" for="rbSec">Group (optional)<input id="rbSec" list="rbSecs" placeholder="e.g. Frosting, Cakes"><datalist id="rbSecs">${sections.map(x => `<option value="${esc(x)}">`).join("")}</datalist></label></div>
+    <div class="two"><label class="f" for="rbFrom">Available from (seasonal / pop-up)<input id="rbFrom" type="date"></label><label class="f" for="rbTo">Available until<input id="rbTo" type="date"></label></div>
+    <label class="f" for="rbFiles">Recipe PDFs<input id="rbFiles" type="file" accept="application/pdf,.pdf" multiple></label>
+    <div id="rbList" class="small muted"></div><div class="err" id="rbErr"></div>
+    <div class="row" style="justify-content:flex-end"><button type="button" data-act="close">Cancel</button><button class="primary" type="submit" id="rbOk">Add recipes</button></div></form></div>`;
+  $("rbFiles").addEventListener("change", e => { const f = [...e.target.files]; $("rbList").innerHTML = f.length ? `${f.length} recipe${f.length > 1 ? "s" : ""}: ` + f.map(x => esc(recNameFromFile(x.name))).join(", ") : ""; });
+  $("rbDlg").addEventListener("submit", async e => {
+    e.preventDefault();
+    const files = [...$("rbFiles").files], err = $("rbErr"), ok = $("rbOk");
+    if (!files.length) { err.textContent = "Choose at least one PDF."; return; }
+    const from = $("rbFrom").value || null, to = $("rbTo").value || null;
+    if (from && to && to < from) { err.textContent = "“Available until” is before “Available from”."; return; }
+    ok.disabled = true; let done = 0; const failed = [];
+    for (const f of files) {
+      ok.textContent = `Adding ${done + 1} of ${files.length}…`;
+      try {
+        const path = await recUpload(f, "pdf"), body = await pdfText(f);
+        const { error } = await sb.from("recipes").insert({ name: recNameFromFile(f.name), category: $("rbCat").value, section: $("rbSec").value.trim(), available_from: from, available_to: to, file_path: path, body });
+        if (error) { sb.storage.from("recipes").remove([path]); throw error; }
+        done++;
+      } catch (x) { failed.push(f.name + " (" + (x.message || "error") + ")"); }
+    }
+    scheduleReload("recipes");
+    if (failed.length) { err.textContent = `Added ${done}. Couldn't add: ` + failed.join("; "); ok.disabled = false; ok.textContent = "Try again"; return; }
+    closeModal(); toast(`Added ${done} recipe${done > 1 ? "s" : ""}`);
+  });
 }
 function attachRecPhoto() {
   const el = $("recPhoto"); if (!el) return;
@@ -1238,11 +1290,11 @@ function recForm(r, cat) {
        { id: "section", label: "Group (optional)", value: r.section, list: "recSections", ph: "e.g. Frosting, Cakes, Fillings" }],
       [{ id: "yield", label: "Makes (optional)", value: r.yield, ph: "e.g. 1 tub, 24 Bundtlets" }, { id: "prep_time", label: "Time (optional)", value: r.prep_time, ph: "e.g. 20 min + 2 hr chill" }],
       [{ id: "available_from", label: "Available from (seasonal / pop-up)", type: "date", value: r.available_from || "" }, { id: "available_to", label: "Available until", type: "date", value: r.available_to || "" }],
-      { id: "ingredients", label: "Ingredients (one per line, amount first so batch sizes work, e.g. 2 lb cream cheese)", type: "textarea", value: r.ingredients },
-      { id: "steps", label: "Steps (one per line)", type: "textarea", value: r.steps },
+      { id: "pdf", label: r.file_path ? "Replace the recipe PDF (optional)" : "Recipe PDF (shown exactly as written)", type: "file", accept: "application/pdf,.pdf" },
+      { id: "ingredients", label: "Ingredients (optional, one per line, amount first, e.g. 2 lb cream cheese, for the batch calculator)", type: "textarea", value: r.ingredients },
+      { id: "steps", label: "Steps (optional, one per line)", type: "textarea", value: r.steps },
       { id: "notes", label: "Notes (optional)", type: "textarea", value: r.notes },
       { id: "photo", label: r.photo_path ? "Replace photo (optional)" : "Photo (optional)", type: "file", accept: "image/*" },
-      { id: "pdf", label: r.file_path ? "Replace PDF (optional)" : "Recipe PDF (optional)", type: "file", accept: "application/pdf,.pdf" },
       ...(r.photo_path ? [{ id: "rm_photo", label: "Remove the current photo", type: "checkbox" }] : []),
       ...(r.file_path ? [{ id: "rm_pdf", label: "Remove the current PDF", type: "checkbox" }] : [])
     ],
@@ -1254,8 +1306,8 @@ function recForm(r, cat) {
       try {
         if (v.photo) { row.photo_path = await recUpload(v.photo, "photo"); if (r.photo_path) old.push(r.photo_path); }
         else if (v.rm_photo) { row.photo_path = null; old.push(r.photo_path); }
-        if (v.pdf) { row.file_path = await recUpload(v.pdf, "pdf"); if (r.file_path) old.push(r.file_path); }
-        else if (v.rm_pdf) { row.file_path = null; old.push(r.file_path); }
+        if (v.pdf) { row.file_path = await recUpload(v.pdf, "pdf"); row.body = await pdfText(v.pdf); if (r.file_path) old.push(r.file_path); }
+        else if (v.rm_pdf) { row.file_path = null; row.body = ""; old.push(r.file_path); }
       } catch (e) { return { error: e.message }; }
       const ok = r.id ? await write("recipes", "update", row, r.id) : await write("recipes", "insert", row);
       if (ok && old.length) sb.storage.from("recipes").remove(old);
@@ -1288,7 +1340,7 @@ function render() {
   const ae = document.activeElement, cntFocus = ae && ae.id && ae.id.startsWith("cnt_") ? ae.id : null;
   main.innerHTML = fn();
   if (view === "nbu") attachViewer();
-  if (view === "recipes") attachRecPhoto();
+  if (view === "recipes") { attachRecPhoto(); attachRecPdf(); }
   if (cntFocus) { const el = $(cntFocus); if (el) el.focus(); }
   keep.forEach(([id, val, focused, pos]) => { const el = $(id); if (!el) return; el.value = val; if (focused) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) { } } });
   const th = $("thread"); if (th) th.scrollTop = th.scrollHeight;
@@ -1342,6 +1394,7 @@ document.addEventListener("click", async e => {
     case "wkCopy": copyLastWeek(); break;
     case "invite": inviteForm(); break;
     case "docNew": docUpload(); break;
+    case "recBulk": recBulk(); break;
     case "recNew": recForm(null, recCat === "all" ? "standard" : recCat); break;
     case "recOpen": recOpen = id; recMult = 1; render(); window.scrollTo(0, 0); break;
     case "recBack": recOpen = ""; render(); window.scrollTo(0, 0); break;
