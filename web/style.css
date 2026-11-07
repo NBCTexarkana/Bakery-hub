@@ -196,3 +196,12 @@ button.ghost{padding-left:8px;padding-right:8px}
 mark{background:#ffe9a8;color:inherit;border-radius:2px;padding:0 1px}
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]) mark{background:#5a4a12}}
 :root[data-theme="dark"] mark{background:#5a4a12}
+
+/* Recipes */
+.ing{margin:0;padding-left:18px}
+.ing li{padding:5px 0;border-bottom:1px dashed var(--line)}
+.ing li:last-child{border-bottom:0}
+.ing b{color:var(--accent);font-variant-numeric:tabular-nums}
+.steps{margin:0;padding-left:22px}
+.steps li{padding:5px 0}
+.steps li::marker{font-weight:700;color:var(--accent)}
