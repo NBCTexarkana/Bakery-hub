@@ -12,7 +12,7 @@ function splitPos(s) { return String(s || "").split(/\s*[,\/]\s*/).map(x => x.tr
 function posOptions(cur) { const extra = splitPos(cur).filter(x => !POSITIONS.includes(x)); return [...POSITIONS, ...extra]; }
 const TARGET = Number(CFG.LABOR_TARGET_PCT) || 25;
 
-const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], cal: [], docs: [], sales: [], hourly: [], items: [], synclog: [] };
+const S = { profiles: [], reminders: [], messages: [], dms: [], inventory: [], vendors: [], orders: [], shifts: [], tshifts: [], cal: [], docs: [], recipes: [], sales: [], hourly: [], items: [], synclog: [] };
 let session = null, me = null, MGR = false, OWNER = false;
 let view = "today", msgTab = "team", dmWith = "", salesDate = "";
 let calMonth = startOfMonth(new Date()), calSel = ymd(new Date()), weekStart = monday(new Date());
@@ -63,10 +63,11 @@ const LOADERS = {
   tshifts: () => sb.from("toast_shifts").select("*").gte("start_at", new Date(Date.now() - 21 * 864e5).toISOString()).order("start_at").limit(3000),
   shifts: () => sb.from("shifts").select("*").gte("date", ymd(addDays(new Date(), -120))).lte("date", ymd(addDays(new Date(), 180))),
   docs: () => sb.from("documents").select("*").order("week_start", { ascending: false, nullsFirst: false }).order("created_at", { ascending: false }).limit(300),
+  recipes: () => sb.from("recipes").select("*").order("name").limit(2000),
   sales: () => sb.from("sales_daily").select("*").order("business_date", { ascending: false }).limit(400),
   synclog: () => sb.from("sync_log").select("*").order("ran_at", { ascending: false }).limit(5),
 };
-const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", cal_events: "cal", documents: "docs", sales_daily: "sales" };
+const TABLE_TO_KEY = { profiles: "profiles", reminders: "reminders", messages: "messages", direct_messages: "dms", inventory_items: "inventory", vendors: "vendors", vendor_orders: "orders", shifts: "shifts", toast_shifts: "tshifts", cal_events: "cal", documents: "docs", recipes: "recipes", sales_daily: "sales" };
 async function load(key) {
   if ((key === "sales" || key === "synclog") && !MGR) return;
   const data = await q(LOADERS[key](), "load " + key);
@@ -173,7 +174,7 @@ function fieldHtml(f) {
   else if (f.type === "textarea") input = `<textarea id="${id}" name="${f.id}" ${req}>${esc(f.value)}</textarea>`;
   else if (f.type === "checks") return `<fieldset style="border:0;padding:0;margin:0;min-width:0"><legend class="small" style="font-weight:600;color:var(--muted);margin-bottom:6px">${esc(f.label)}</legend><div class="row" style="gap:8px 16px">${f.options.map((o, i) => `<label class="row small" for="${id}_${i}" style="gap:6px;font-weight:500"><input type="checkbox" class="check" id="${id}_${i}" name="${f.id}" value="${esc(o)}" ${(f.value || []).includes(o) ? "checked" : ""}> ${esc(o)}</label>`).join("")}</div></fieldset>`;
   else if (f.type === "checkbox") return `<label class="row small" style="gap:8px;font-weight:600" for="${id}"><input type="checkbox" class="check" id="${id}" name="${f.id}" ${f.value ? "checked" : ""}> ${esc(f.label)}</label>`;
-  else input = `<input id="${id}" name="${f.id}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${req} ${f.ph ? `placeholder="${esc(f.ph)}"` : ""} ${f.type === "number" ? 'step="any" inputmode="decimal"' : ""} ${f.list ? `list="${f.list}"` : ""} ${f.disabled ? "disabled" : ""}>`;
+  else input = `<input id="${id}" name="${f.id}" type="${f.type || "text"}" value="${esc(f.value ?? "")}" ${req} ${f.ph ? `placeholder="${esc(f.ph)}"` : ""} ${f.type === "number" ? 'step="any" inputmode="decimal"' : ""} ${f.list ? `list="${f.list}"` : ""} ${f.accept ? `accept="${f.accept}"` : ""} ${f.disabled ? "disabled" : ""}>`;
   return `<label class="f" for="${id}">${esc(f.label)}${input}</label>`;
 }
 function openForm(o) {
@@ -191,7 +192,7 @@ function openForm(o) {
     const bad = [...form.querySelectorAll("[required]")].find(el => !el.value.trim());
     if (bad) { bad.focus(); $("dlgErr").textContent = "Fill in the required fields."; return; }
     const v = {};
-    o.fields.flat().forEach(f => { if (f.type === "checks") { v[f.id] = [...form.querySelectorAll(`input[name="${f.id}"]:checked`)].map(x => x.value).join(", "); return; } const el = form.elements[f.id]; if (!el || f.disabled) return; let val = f.type === "checkbox" ? el.checked : el.value; if (f.type === "number") val = num(val); else if (typeof val === "string") val = val.trim(); v[f.id] = val; });
+    o.fields.flat().forEach(f => { if (f.type === "checks") { v[f.id] = [...form.querySelectorAll(`input[name="${f.id}"]:checked`)].map(x => x.value).join(", "); return; } const el = form.elements[f.id]; if (!el || f.disabled) return; let val = f.type === "checkbox" ? el.checked : f.type === "file" ? (el.files[0] || null) : el.value; if (f.type === "number") val = num(val); else if (typeof val === "string") val = val.trim(); v[f.id] = val; });
     $("dlgOk").disabled = true;
     const ok = await o.onSubmit(v);
     if (ok === false || (ok && ok.error)) { $("dlgOk").disabled = false; if (ok && ok.error) $("dlgErr").textContent = ok.error; return; }
@@ -1121,9 +1122,152 @@ function nbuCard() {
     <a class="btn" href="#nbu" data-act="docOpen" data-id="${d.id}" style="display:inline-block;margin-top:8px;text-decoration:none">Open the NBU</a></section>`;
 }
 
+/* ---------------- recipes ---------------- */
+const REC_CATS = [["standard", "Recipes"], ["seasonal", "Seasonal"], ["popup", "Pop-Up"]];
+const REC_LABEL = { standard: "Recipe", seasonal: "Seasonal", popup: "Pop-Up" };
+let recCat = "all", recQ = "", recOpen = "", recMult = 1;
+const recUrls = {};
+const FRAC = { "½": .5, "¼": .25, "¾": .75, "⅓": 1 / 3, "⅔": 2 / 3, "⅛": .125, "⅜": .375, "⅝": .625, "⅞": .875 };
+function qtyVal(s) {
+  s = s.trim(); let m;
+  if ((m = s.match(/^(\d+)\s*([½¼¾⅓⅔⅛⅜⅝⅞])$/))) return +m[1] + FRAC[m[2]];
+  if (FRAC[s] != null) return FRAC[s];
+  if ((m = s.match(/^(\d+)\s+(\d+)\/(\d+)$/))) return +m[1] + m[2] / m[3];
+  if ((m = s.match(/^(\d+)\/(\d+)$/))) return m[1] / m[2];
+  return parseFloat(s);
+}
+function qtyFmt(n) {
+  if (n >= 20 || Math.abs(n * 8 - Math.round(n * 8)) > 0.02) return String(Math.round(n * 100) / 100);
+  const w = Math.floor(n + 1e-9), f = Math.round((n - w) * 8);
+  const F = { 0: "", 1: "⅛", 2: "¼", 3: "⅜", 4: "½", 5: "⅝", 6: "¾", 7: "⅞" }[f];
+  return w ? (F ? w + " " + F : String(w)) : (F || "0");
+}
+const QTY_RE = /^(\s*)(\d+\s+\d+\/\d+|\d+\s*[½¼¾⅓⅔⅛⅜⅝⅞]|\d+\/\d+|[½¼¾⅓⅔⅛⅜⅝⅞]|\d*\.\d+|\d+)(\s*(?:-|–|to)\s*(\d+\s+\d+\/\d+|\d+\/\d+|\d*\.\d+|\d+))?/;
+function scaleLine(line, k) {
+  const m = line.match(QTY_RE);
+  if (!m) return esc(line);
+  const rest = line.slice(m[0].length);
+  if (k === 1) return `<b>${esc(m[2] + (m[3] || ""))}</b>${esc(rest)}`;
+  const a = qtyFmt(qtyVal(m[2]) * k), b = m[4] ? "–" + qtyFmt(qtyVal(m[4]) * k) : "";
+  return `<b>${esc(a + b)}</b>${esc(rest)}`;
+}
+function recLines(s) { return String(s || "").split(/\r?\n/).map(x => x.trim()).filter(Boolean); }
+function recDates(r) { if (!r.available_from && !r.available_to) return ""; const f = s => fmtDate(s, { month: "short", day: "numeric" }); return r.available_from && r.available_to ? `${f(r.available_from)} – ${f(r.available_to)}` : r.available_from ? "From " + f(r.available_from) : "Until " + f(r.available_to); }
+function recStatus(r) {
+  if (r.category === "standard" || (!r.available_from && !r.available_to)) return "";
+  const t = today();
+  if (r.available_to && r.available_to < t) return '<span class="chip">Ended</span>';
+  if (r.available_from && r.available_from > t) return '<span class="chip warn">Coming up</span>';
+  return '<span class="chip ok">Available now</span>';
+}
+function recRank(r) { const t = today(); if (r.category === "standard") return 1; if (r.available_to && r.available_to < t) return 3; if (r.available_from && r.available_from > t) return 2; return 0; }
+function vRecipes() {
+  const r = recOpen && S.recipes.find(x => x.id === recOpen);
+  if (r) return vRecipe(r);
+  recOpen = "";
+  const q = recQ.trim().toLowerCase();
+  const list = S.recipes.filter(x => (recCat === "all" || x.category === recCat) && (!q || [x.name, x.section, x.ingredients, x.steps, x.notes].join(" ").toLowerCase().includes(q)));
+  const tabs = [["all", "All"], ...REC_CATS];
+  const head = `<div class="head"><h2>Recipes</h2>${MGR ? `<button class="primary" data-act="recNew">Add recipe</button>` : ""}</div>
+    <div class="sub" role="group" aria-label="Recipe types">${tabs.map(([k, l]) => `<button data-act="recCat" data-tab="${k}" aria-pressed="${recCat === k}">${l}${k !== "all" ? ` <span class="small">${S.recipes.filter(x => x.category === k).length}</span>` : ""}</button>`).join("")}</div>
+    <label class="f" for="recQ" style="max-width:520px">Search recipes<input id="recQ" type="search" placeholder="e.g. cream cheese frosting, pumpkin, butter" value="${esc(recQ)}"></label>`;
+  if (!S.recipes.length) return head + `<div class="empty">${MGR ? "No recipes yet. Tap “Add recipe” to add your first one." : "No recipes posted yet."}</div>`;
+  if (!list.length) return head + `<div class="empty">No recipes match.</div>`;
+  const cats = recCat === "all" ? REC_CATS : REC_CATS.filter(c => c[0] === recCat);
+  return head + `<div class="grid">${cats.map(([k, l]) => {
+    const L = list.filter(x => x.category === k).sort((a, b) => recRank(a) - recRank(b) || (a.section || "").localeCompare(b.section || "") || a.name.localeCompare(b.name));
+    if (!L.length) return "";
+    let sec = null;
+    return `<section class="card"><h3>${l === "Recipes" ? "Recipes" : l + " recipes"}</h3><div class="list">${L.map(x => {
+      const h = k === "standard" && (x.section || "") !== sec ? (sec = x.section || "", `<div class="small" style="font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;padding-top:10px">${esc(sec || "Other")}</div>`) : "";
+      return h + `<div class="item"><div class="grow"><button class="link t" data-act="recOpen" data-id="${x.id}">${esc(x.name)}</button>
+        <div class="row small muted" style="gap:6px;margin-top:2px">${k !== "standard" && x.section ? `<span>${esc(x.section)}</span>` : ""}${x.yield ? `<span>Makes ${esc(x.yield)}</span>` : ""}${recDates(x) ? `<span>${esc(recDates(x))}</span>` : ""}${recStatus(x)}${x.photo_path ? '<span class="chip">Photo</span>' : ""}${x.file_path ? '<span class="chip">PDF</span>' : ""}</div></div></div>`;
+    }).join("")}</div></section>`;
+  }).join("")}</div>`;
+}
+function vRecipe(r) {
+  const ing = recLines(r.ingredients), steps = recLines(r.steps);
+  const mults = [[0.5, "½×"], [1, "1×"], [2, "2×"], [3, "3×"], [4, "4×"]];
+  return `<div class="head"><button class="ghost sm" data-act="recBack">← All recipes</button></div>
+  <div class="head"><div style="margin-right:auto"><h2 style="margin:0">${esc(r.name)}</h2>
+    <div class="row small muted" style="gap:6px;margin-top:4px"><span class="chip acc">${esc(REC_LABEL[r.category] || "Recipe")}</span>${r.section ? `<span>${esc(r.section)}</span>` : ""}${recDates(r) ? `<span>${esc(recDates(r))}</span>` : ""}${recStatus(r)}</div></div>
+    ${r.file_path ? `<button data-act="recFile" data-id="${r.id}">Open PDF</button>` : ""}${MGR ? `<button data-act="recEdit" data-id="${r.id}">Edit</button>` : ""}</div>
+  <div class="grid">
+    <section class="card"><h3>Ingredients</h3>
+      <div class="row small" style="gap:8px;margin-bottom:8px;align-items:center"><span class="muted">Batch size</span><div class="sub" role="group" aria-label="Batch size" style="margin:0">${mults.map(([k, l]) => `<button class="sm" data-act="recMult" data-k="${k}" aria-pressed="${recMult === k}">${l}</button>`).join("")}</div></div>
+      ${r.yield ? `<div class="small muted" style="margin-bottom:6px">${recMult !== 1 ? `A 1× batch makes ${esc(r.yield)}. Showing a ${qtyFmt(recMult)}× batch.` : `Makes ${esc(r.yield)}`}</div>` : ""}
+      ${ing.length ? `<ul class="ing">${ing.map(l => `<li>${scaleLine(l, recMult)}</li>`).join("")}</ul>` : `<div class="empty">No ingredients listed.</div>`}
+      ${r.prep_time ? `<div class="small muted" style="margin-top:8px">Time: ${esc(r.prep_time)}</div>` : ""}
+    </section>
+    <section class="card"><h3>Steps</h3>${steps.length ? `<ol class="steps">${steps.map(s => `<li>${esc(s.replace(/^\d+[.)]\s*/, ""))}</li>`).join("")}</ol>` : `<div class="empty">No steps listed.</div>`}
+      ${r.notes ? `<h3 style="margin-top:14px">Notes</h3><div style="white-space:pre-wrap">${esc(r.notes)}</div>` : ""}</section>
+    ${r.photo_path ? `<section class="card"><h3>Photo</h3><div id="recPhoto" data-path="${esc(r.photo_path)}"><div class="empty">Loading photo…</div></div></section>` : ""}
+  </div>`;
+}
+async function recSigned(path) {
+  const c = recUrls[path]; if (c && c.exp > Date.now()) return c.url;
+  const { data, error } = await sb.storage.from("recipes").createSignedUrl(path, 3600);
+  if (error || !data) throw error || new Error("no link");
+  recUrls[path] = { url: data.signedUrl, exp: Date.now() + 50 * 60000 }; return data.signedUrl;
+}
+function attachRecPhoto() {
+  const el = $("recPhoto"); if (!el) return;
+  recSigned(el.dataset.path).then(u => { if ($("recPhoto") === el) el.innerHTML = `<img src="${esc(u)}" alt="${esc((S.recipes.find(x => x.id === recOpen) || {}).name || "Recipe")} photo" style="width:100%;border-radius:8px;display:block">`; })
+    .catch(() => { el.innerHTML = `<div class="empty">Couldn't load the photo.</div>`; });
+}
+async function recUpload(file, kind) {
+  if (!file) return null;
+  const okType = kind === "photo" ? /^image\//.test(file.type) : /pdf$/i.test(file.type) || /\.pdf$/i.test(file.name);
+  if (!okType) throw new Error(kind === "photo" ? "The photo must be an image (JPG or PNG)." : "The attachment must be a PDF.");
+  if (file.size > 20 * 1024 * 1024) throw new Error("That file is over 20 MB.");
+  const ext = (file.name.match(/\.[a-z0-9]+$/i) || [kind === "photo" ? ".jpg" : ".pdf"])[0].toLowerCase();
+  const path = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}${ext}`;
+  const { error } = await sb.storage.from("recipes").upload(path, file, { contentType: file.type || undefined, upsert: false });
+  if (error) throw new Error("Couldn't upload: " + error.message);
+  return path;
+}
+function recForm(r, cat) {
+  r = r || {};
+  const sections = [...new Set(S.recipes.map(x => x.section).filter(Boolean))].sort();
+  openForm({
+    title: r.id ? "Edit recipe" : "Add a recipe", submit: r.id ? "Save" : "Add recipe",
+    extra: `<datalist id="recSections">${sections.map(s => `<option value="${esc(s)}">`).join("")}</datalist>`,
+    fields: [
+      { id: "name", label: "Recipe name", value: r.name, required: true, ph: "e.g. Cream Cheese Frosting" },
+      [{ id: "category", label: "Type", type: "select", value: r.category || cat || "standard", options: REC_CATS },
+       { id: "section", label: "Group (optional)", value: r.section, list: "recSections", ph: "e.g. Frosting, Cakes, Fillings" }],
+      [{ id: "yield", label: "Makes (optional)", value: r.yield, ph: "e.g. 1 tub, 24 Bundtlets" }, { id: "prep_time", label: "Time (optional)", value: r.prep_time, ph: "e.g. 20 min + 2 hr chill" }],
+      [{ id: "available_from", label: "Available from (seasonal / pop-up)", type: "date", value: r.available_from || "" }, { id: "available_to", label: "Available until", type: "date", value: r.available_to || "" }],
+      { id: "ingredients", label: "Ingredients (one per line, amount first so batch sizes work, e.g. 2 lb cream cheese)", type: "textarea", value: r.ingredients },
+      { id: "steps", label: "Steps (one per line)", type: "textarea", value: r.steps },
+      { id: "notes", label: "Notes (optional)", type: "textarea", value: r.notes },
+      { id: "photo", label: r.photo_path ? "Replace photo (optional)" : "Photo (optional)", type: "file", accept: "image/*" },
+      { id: "pdf", label: r.file_path ? "Replace PDF (optional)" : "Recipe PDF (optional)", type: "file", accept: "application/pdf,.pdf" },
+      ...(r.photo_path ? [{ id: "rm_photo", label: "Remove the current photo", type: "checkbox" }] : []),
+      ...(r.file_path ? [{ id: "rm_pdf", label: "Remove the current PDF", type: "checkbox" }] : [])
+    ],
+    onSubmit: async v => {
+      const row = { name: v.name, category: v.category, section: v.section, yield: v.yield, prep_time: v.prep_time, ingredients: v.ingredients, steps: v.steps, notes: v.notes,
+        available_from: v.available_from || null, available_to: v.available_to || null, updated_at: new Date().toISOString() };
+      if (row.available_from && row.available_to && row.available_to < row.available_from) return { error: "“Available until” is before “Available from”." };
+      const old = [];
+      try {
+        if (v.photo) { row.photo_path = await recUpload(v.photo, "photo"); if (r.photo_path) old.push(r.photo_path); }
+        else if (v.rm_photo) { row.photo_path = null; old.push(r.photo_path); }
+        if (v.pdf) { row.file_path = await recUpload(v.pdf, "pdf"); if (r.file_path) old.push(r.file_path); }
+        else if (v.rm_pdf) { row.file_path = null; old.push(r.file_path); }
+      } catch (e) { return { error: e.message }; }
+      const ok = r.id ? await write("recipes", "update", row, r.id) : await write("recipes", "insert", row);
+      if (ok && old.length) sb.storage.from("recipes").remove(old);
+      return ok;
+    },
+    onDelete: r.id ? async () => { const ok = await write("recipes", "delete", null, r.id); if (ok) { const f = [r.photo_path, r.file_path].filter(Boolean); if (f.length) sb.storage.from("recipes").remove(f); recOpen = ""; } } : null
+  });
+}
+
 /* ---------------- render ---------------- */
 function views() {
-  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["nbu", "NBU/SRG"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
+  return [["today", "Today"], ...(MGR ? [["sales", "Sales"]] : []), ["calendar", "Calendar"], ["nbu", "NBU/SRG"], ["recipes", "Recipes"], ["messages", "Messages"], ["inventory", "Supplies"], ["orders", "Orders"], ["schedule", "Schedule"], ["team", "Team"]];
 }
 function renderTabs() {
   const t = today();
@@ -1139,11 +1283,12 @@ function render() {
   if (!me) return;
   renderTabs();
   const main = $("main");
-  const keep = ["msgText", "dmText", "invQ", "docQ"].map(id => { const el = $(id); return el ? [id, el.value, el === document.activeElement, el.selectionStart] : null; }).filter(Boolean);
-  const fn = { today: vToday, sales: vSales, calendar: vCalendar, nbu: vDocs, messages: vMessages, inventory: vInventory, orders: vOrders, schedule: vSchedule, team: vTeam }[view] || vToday;
+  const keep = ["msgText", "dmText", "invQ", "docQ", "recQ"].map(id => { const el = $(id); return el ? [id, el.value, el === document.activeElement, el.selectionStart] : null; }).filter(Boolean);
+  const fn = { today: vToday, sales: vSales, calendar: vCalendar, nbu: vDocs, recipes: vRecipes, messages: vMessages, inventory: vInventory, orders: vOrders, schedule: vSchedule, team: vTeam }[view] || vToday;
   const ae = document.activeElement, cntFocus = ae && ae.id && ae.id.startsWith("cnt_") ? ae.id : null;
   main.innerHTML = fn();
   if (view === "nbu") attachViewer();
+  if (view === "recipes") attachRecPhoto();
   if (cntFocus) { const el = $(cntFocus); if (el) el.focus(); }
   keep.forEach(([id, val, focused, pos]) => { const el = $(id); if (!el) return; el.value = val; if (focused) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) { } } });
   const th = $("thread"); if (th) th.scrollTop = th.scrollHeight;
@@ -1197,6 +1342,13 @@ document.addEventListener("click", async e => {
     case "wkCopy": copyLastWeek(); break;
     case "invite": inviteForm(); break;
     case "docNew": docUpload(); break;
+    case "recNew": recForm(null, recCat === "all" ? "standard" : recCat); break;
+    case "recOpen": recOpen = id; recMult = 1; render(); window.scrollTo(0, 0); break;
+    case "recBack": recOpen = ""; render(); window.scrollTo(0, 0); break;
+    case "recCat": recCat = b.dataset.tab; render(); break;
+    case "recMult": recMult = Number(b.dataset.k) || 1; render(); break;
+    case "recEdit": { const r = S.recipes.find(x => x.id === id); if (r) recForm(r); break; }
+    case "recFile": { const r = S.recipes.find(x => x.id === id); if (!r || !r.file_path) break; const w = window.open("", "_blank"); recSigned(r.file_path).then(u => { if (w) w.location.href = u; else location.href = u; }).catch(e => { if (w) w.close(); toast("Couldn't open the PDF."); }); break; }
     case "docOpen": docOpen = id; if (view === "nbu") { render(); window.scrollTo(0, 0); } break;
     case "docBack": docOpen = ""; render(); window.scrollTo(0, 0); break;
     case "docPdf": { const d = S.docs.find(x => x.id === id); if (d) docPdfOpen(d); break; }
@@ -1233,6 +1385,7 @@ document.addEventListener("change", async e => {
 document.addEventListener("input", e => {
   if (e.target.id === "invQ") { invF.q = e.target.value; render(); }
   if (e.target.id === "docQ") { docQ = e.target.value; render(); }
+  if (e.target.id === "recQ") { recQ = e.target.value; render(); }
   if (e.target.classList && e.target.classList.contains("cnt")) {
     countDraft[e.target.dataset.id] = e.target.value;
     const n = $("countN"); if (n) n.textContent = Object.values(countDraft).filter(v => String(v).trim() !== "").length;
@@ -1307,7 +1460,7 @@ async function startAppInner() {
   if (!me.active) { await sb.auth.signOut(); showAuth("login", "Your account has been turned off. Talk to a manager."); return; }
   $("authView").hidden = true; $("appView").hidden = false;
   $("main").innerHTML = `<div class="empty">Loading…</div>`;
-  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "cal", "docs", "sales", "synclog"].map(load));
+  await Promise.all(["reminders", "messages", "dms", "inventory", "vendors", "orders", "shifts", "tshifts", "cal", "docs", "recipes", "sales", "synclog"].map(load));
   if (!booted) {
     booted = true;
     channel = sb.channel("hub");
